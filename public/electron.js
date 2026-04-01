@@ -15,6 +15,77 @@ let mainWindow;
 let workingDirectory = process.cwd() || __dirname.replace(/[\\\/]public$/, '');
 let lastEditedFile = null;
 
+// ==================== 权限模式管理 ====================
+let permissionMode = 'default'; // 'default' | 'auto'
+const pendingConfirmations = new Map(); // requestId -> { resolve, reject }
+
+// 需要确认的危险工具
+const DANGEROUS_TOOLS = ['Bash', 'Shell', 'Write', 'Edit', 'StrReplace', 'Delete'];
+
+// 生成工具描述
+function getToolDescription(toolName, input) {
+    switch (toolName) {
+        case 'Bash':
+        case 'Shell':
+            return `执行命令: ${input.command || input.cmd || ''}`;
+        case 'Write':
+            return `写入文件: ${input.path || input.file_path || ''}`;
+        case 'Edit':
+        case 'StrReplace':
+            return `编辑文件: ${input.path || input.file_path || ''}`;
+        case 'Delete':
+            return `删除文件: ${input.path || input.file_path || ''}`;
+        default:
+            return `执行工具: ${toolName}`;
+    }
+}
+
+// 请求用户确认
+async function requestToolConfirmation(toolName, toolInput) {
+    // 自动模式直接放行
+    if (permissionMode === 'auto') {
+        return true;
+    }
+    
+    // 非危险工具直接放行
+    if (!DANGEROUS_TOOLS.includes(toolName)) {
+        return true;
+    }
+    
+    // 只读操作直接放行
+    if (toolName === 'Read' || toolName === 'Grep' || toolName === 'Glob' || toolName === 'LS') {
+        return true;
+    }
+    
+    const requestId = crypto.randomUUID();
+    const description = getToolDescription(toolName, toolInput);
+    
+    return new Promise((resolve) => {
+        pendingConfirmations.set(requestId, { resolve });
+        
+        // 发送确认请求到前端
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('tool-confirm-request', {
+                toolName,
+                toolInput,
+                requestId,
+                description
+            });
+        } else {
+            // 没有窗口时自动放行
+            resolve(true);
+        }
+        
+        // 超时自动拒绝 (60秒)
+        setTimeout(() => {
+            if (pendingConfirmations.has(requestId)) {
+                pendingConfirmations.delete(requestId);
+                resolve(false);
+            }
+        }, 60000);
+    });
+}
+
 // ==================== SSH 远程连接管理 ====================
 let sshConnection = null;
 let sftpSession = null;
@@ -429,10 +500,188 @@ async function executeToolRemotely(toolName, input, context) {
     }
 }
 
-// ==================== Claude API 配置（使用 cursor2api 本地代理） ====================
+// ==================== 多厂商 API 配置 ====================
+const PROVIDER_CONFIG_FILE = path.join(os.homedir(), '.sparks-providers.json');
+
+// 厂商配置
+let providersConfig = {
+    cursor2api: {
+        apiKey: 'sk-cursor2api',
+        baseUrl: 'http://localhost:3010',
+        enabled: true,
+        useProxy: false,
+        proxyUrl: 'http://127.0.0.1:7890',
+        selectedModel: 'google/gemini-3-flash',
+    },
+    openai: {
+        apiKey: '',
+        baseUrl: 'https://api.openai.com/v1',
+        enabled: false,
+        useProxy: true,
+        proxyUrl: 'http://127.0.0.1:7890',
+        selectedModel: 'gpt-4o',
+    },
+    anthropic: {
+        apiKey: '',
+        baseUrl: 'https://api.anthropic.com',
+        enabled: false,
+        useProxy: true,
+        proxyUrl: 'http://127.0.0.1:7890',
+        selectedModel: 'claude-sonnet-4-20250514',
+    },
+    google: {
+        apiKey: '',
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+        enabled: false,
+        useProxy: true,
+        proxyUrl: 'http://127.0.0.1:7890',
+        selectedModel: 'gemini-2.5-pro',
+    },
+    deepseek: {
+        apiKey: '',
+        baseUrl: 'https://api.deepseek.com',
+        enabled: false,
+        useProxy: false,
+        proxyUrl: '',
+        selectedModel: 'deepseek-chat',
+    },
+    qwen: {
+        apiKey: '',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        enabled: false,
+        useProxy: false,
+        proxyUrl: '',
+        selectedModel: 'qwen-max',
+    },
+    custom: {
+        apiKey: '',
+        baseUrl: '',
+        enabled: false,
+        useProxy: false,
+        proxyUrl: '',
+        selectedModel: '',
+        customModels: '',
+    },
+};
+
+// 各厂商客户端
+let providerClients = {
+    cursor2api: null,  // Anthropic SDK (cursor2api)
+    openai: null,      // OpenAI SDK
+    anthropic: null,   // Anthropic SDK (直连)
+    google: null,      // Google SDK (用 fetch)
+    deepseek: null,    // OpenAI SDK (兼容)
+    qwen: null,        // OpenAI SDK (兼容)
+    custom: null,      // OpenAI SDK (兼容)
+};
+
+// 加载厂商配置
+function loadProvidersConfig() {
+    try {
+        if (fs.existsSync(PROVIDER_CONFIG_FILE)) {
+            const saved = JSON.parse(fs.readFileSync(PROVIDER_CONFIG_FILE, 'utf8'));
+            providersConfig = { ...providersConfig, ...saved };
+            console.log('[Providers] Config loaded');
+        }
+    } catch (e) {
+        console.error('[Providers] Failed to load config:', e.message);
+    }
+    
+    // 初始化各厂商客户端
+    initAllProviderClients();
+}
+
+// 保存厂商配置
+function saveProvidersConfig() {
+    try {
+        fs.writeFileSync(PROVIDER_CONFIG_FILE, JSON.stringify(providersConfig, null, 2));
+        console.log('[Providers] Config saved');
+    } catch (e) {
+        console.error('[Providers] Failed to save config:', e.message);
+    }
+}
+
+// 初始化所有厂商客户端
+function initAllProviderClients() {
+    // cursor2api (使用 Anthropic SDK)
+    if (providersConfig.cursor2api.enabled) {
+        try {
+            providerClients.cursor2api = new Anthropic({
+                apiKey: providersConfig.cursor2api.apiKey,
+                baseURL: providersConfig.cursor2api.baseUrl,
+            });
+            console.log('[cursor2api] Client initialized');
+        } catch (e) {
+            console.error('[cursor2api] Init failed:', e.message);
+        }
+    }
+    
+    // OpenAI
+    if (providersConfig.openai.apiKey) {
+        initProviderClient('openai');
+    }
+    
+    // Anthropic 直连
+    if (providersConfig.anthropic.apiKey) {
+        initProviderClient('anthropic');
+    }
+    
+    // DeepSeek (OpenAI 兼容)
+    if (providersConfig.deepseek.apiKey) {
+        initProviderClient('deepseek');
+    }
+    
+    // 千问 (OpenAI 兼容)
+    if (providersConfig.qwen.apiKey) {
+        initProviderClient('qwen');
+    }
+    
+    // 自定义 (OpenAI 兼容)
+    if (providersConfig.custom.apiKey && providersConfig.custom.baseUrl) {
+        initProviderClient('custom');
+    }
+}
+
+// 初始化单个厂商客户端
+function initProviderClient(provider) {
+    const config = providersConfig[provider];
+    if (!config.apiKey) {
+        console.log(`[${provider}] No API key configured`);
+        return false;
+    }
+    
+    try {
+        const clientOptions = {
+            apiKey: config.apiKey,
+            baseURL: config.baseUrl,
+            timeout: 120000,
+        };
+        
+        // 如果需要代理
+        if (config.useProxy && config.proxyUrl) {
+            clientOptions.fetch = createProxiedFetch(config.proxyUrl);
+            console.log(`[${provider}] Using proxy: ${config.proxyUrl}`);
+        }
+        
+        if (provider === 'anthropic') {
+            providerClients.anthropic = new Anthropic(clientOptions);
+        } else {
+            // OpenAI 兼容的厂商
+            providerClients[provider] = new OpenAI(clientOptions);
+        }
+        
+        console.log(`[${provider}] Client initialized`);
+        return true;
+    } catch (e) {
+        console.error(`[${provider}] Init failed:`, e.message);
+        return false;
+    }
+}
+
+// ==================== 兼容旧配置 ====================
 let claudeConfig = {
-    baseUrl: 'http://localhost:3010',  // cursor2api 端口（见 cursor2api/config.yaml）
-    apiKey: 'sk-cursor2api',           // cursor2api 不需要真实 key，任意值即可
+    baseUrl: 'http://localhost:3010',
+    apiKey: 'sk-cursor2api',
     enabled: true,
 };
 let anthropicClient = null;
@@ -575,27 +824,29 @@ function loadConfig() {
         // 先从环境变量加载代理配置
         loadProxyConfig();
         
+        // 加载多厂商配置
+        loadProvidersConfig();
+        
+        // 兼容旧配置
         if (fs.existsSync(CONFIG_FILE)) {
             const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
             if (config.claudeConfig) {
                 claudeConfig = { ...claudeConfig, ...config.claudeConfig };
             }
             if (config.openaiConfig) {
-                // 环境变量优先级高于配置文件
                 const envUseProxy = process.env.OPENAI_USE_PROXY === 'true' || process.env.USE_PROXY === 'true';
                 const envProxyUrl = process.env.OPENAI_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
                 openaiConfig = { 
                     ...openaiConfig, 
                     ...config.openaiConfig,
-                    // 如果环境变量设置了，优先使用环境变量
                     useProxy: envUseProxy || config.openaiConfig.useProxy || false,
                     proxyUrl: envProxyUrl || config.openaiConfig.proxyUrl || 'http://127.0.0.1:7890',
                 };
             }
         }
-        // 始终初始化客户端（使用 cursor2api）
+        
+        // 初始化客户端（使用 cursor2api / 多厂商）
         initAnthropicClient();
-        // 初始化 OpenAI 客户端（如果有配置）
         if (openaiConfig.apiKey) {
             initOpenAIClient();
         }
@@ -935,7 +1186,8 @@ function createWindow() {
         height: 800,
         minWidth: 900,
         minHeight: 600,
-        title: 'Cursor Code',
+        title: 'Sparks',
+        icon: path.join(__dirname, 'sparks-icon.png'),
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false
@@ -1842,11 +2094,28 @@ async function handleToolCall(toolName, input, context = {}) {
     // 检查是否在远程模式下
     const remoteIndicator = isRemoteMode ? ' 🌐' : '';
     
-    // 流式输出工具开始执行
+    // ========== 权限确认 ==========
+    const approved = await requestToolConfirmation(toolName, input);
+    if (!approved) {
+        toolStats.failedCalls++;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', `<!--TOOL_DENIED:${toolName}-->\n`);
+        }
+        return {
+            success: false,
+            error: '用户拒绝执行此操作',
+            toolUseId: context.toolUseId,
+        };
+    }
+    // ========== 权限确认结束 ==========
+    
+    // 获取工具图标
+    const toolIcon = getToolIcon(toolName);
+    const inputSummary = getToolInputSummary(toolName, input);
+    
+    // 流式输出工具开始执行 - 使用特殊标记
     if (mainWindow && !mainWindow.isDestroyed()) {
-        const inputSummary = getToolInputSummary(toolName, input);
-        mainWindow.webContents.send('chat-stream', `\n⚡ **${toolName}**${remoteIndicator} ${inputSummary}\n`);
-        mainWindow.webContents.send('chat-stream', `   ⏳ 执行中...\n`);
+        mainWindow.webContents.send('chat-stream', `\n<!--TOOL_START:${toolName}:${toolIcon}:${inputSummary}-->\n`);
     }
     
     try {
@@ -1873,13 +2142,9 @@ async function handleToolCall(toolName, input, context = {}) {
         toolStats.successfulCalls++;
         toolStats.totalDurationMs += durationMs;
         
-        // 流式输出执行结果
+        // 流式输出执行结果 - 使用特殊标记
         if (mainWindow && !mainWindow.isDestroyed()) {
-            const resultSummary = getToolResultSummary(toolName, result);
-            mainWindow.webContents.send('chat-stream', `   ✅ 完成 (${durationMs}ms)\n`);
-            if (resultSummary) {
-                mainWindow.webContents.send('chat-stream', `   ${resultSummary}\n`);
-            }
+            mainWindow.webContents.send('chat-stream', `<!--TOOL_END:success:${durationMs}-->\n`);
         }
         
         // 发送进度完成事件
@@ -1905,9 +2170,9 @@ async function handleToolCall(toolName, input, context = {}) {
         toolStats.failedCalls++;
         toolStats.totalDurationMs += durationMs;
         
-        // 流式输出错误
+        // 流式输出错误 - 使用特殊标记
         if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('chat-stream', `   ❌ 失败: ${err.message}\n`);
+            mainWindow.webContents.send('chat-stream', `<!--TOOL_END:error:${durationMs}:${err.message}-->\n`);
         }
         
         // 发送进度错误事件
@@ -1929,6 +2194,28 @@ async function handleToolCall(toolName, input, context = {}) {
             toolUseId: context.toolUseId,
         };
     }
+}
+
+/**
+ * 获取工具图标
+ */
+function getToolIcon(toolName) {
+    const icons = {
+        'Read': '📖',
+        'Write': '📝',
+        'Edit': '✏️',
+        'StrReplace': '🔄',
+        'Bash': '⚙️',
+        'Shell': '💻',
+        'Glob': '🔍',
+        'Grep': '🔎',
+        'LS': '📂',
+        'WebFetch': '🌐',
+        'WebSearch': '🔍',
+        'Delete': '🗑️',
+        'Remote': '📡',
+    };
+    return icons[toolName] || '🔧';
 }
 
 /**
@@ -2095,7 +2382,7 @@ ipcMain.handle('list-files', async () => {
     try {
         const items = fs.readdirSync(workingDirectory, { withFileTypes: true });
         return items
-            .filter(i => !i.name.startsWith('.') && i.name !== 'node_modules')
+            .filter(i => i.name !== 'node_modules')  // 只过滤 node_modules，保留 . 开头的文件
             .slice(0, 100)
             .map(i => ({ name: i.name, isDir: i.isDirectory(), path: path.join(workingDirectory, i.name) }));
     } catch { return []; }
@@ -2134,6 +2421,39 @@ ipcMain.handle('run-command', async (e, command) => {
 
 ipcMain.handle('open-file', async (e, filePath) => {
     shell.openPath(path.isAbsolute(filePath) ? filePath : path.join(workingDirectory, filePath));
+});
+
+// 选择文件对话框
+ipcMain.handle('select-files', async () => {
+    const { dialog } = require('electron');
+    const result = await dialog.showOpenDialog(mainWindow, {
+        title: '选择文件',
+        defaultPath: workingDirectory,
+        properties: ['openFile', 'multiSelections'],
+        filters: [
+            { name: '所有文件', extensions: ['*'] }
+        ]
+    });
+    
+    if (result.canceled) {
+        return [];
+    }
+    return result.filePaths;
+});
+
+// 选择文件夹对话框
+ipcMain.handle('select-folder', async () => {
+    const { dialog } = require('electron');
+    const result = await dialog.showOpenDialog(mainWindow, {
+        title: '选择文件夹',
+        defaultPath: workingDirectory,
+        properties: ['openDirectory']
+    });
+    
+    if (result.canceled) {
+        return null;
+    }
+    return result.filePaths[0];
 });
 
 // ==================== SSH 远程连接 IPC ====================
@@ -2552,7 +2872,7 @@ const TOOL_CAPABILITY_PATTERNS = [
 
 // ==================== 固定回复模板 ====================
 
-const MOCK_IDENTITY_RESPONSE = `## 🤖 Cursor Code 助手
+const MOCK_IDENTITY_RESPONSE = `## 🤖 Sparks 助手
 
 我是一个本地 AI 编程助手，运行在 Electron 桌面应用中。
 
@@ -3560,19 +3880,19 @@ async function attemptLocalExecution(userText) {
     
     // ========== 你是谁 / 自我介绍 ==========
     if (/你是谁|你是什么|介绍.*自己|who\s*are\s*you/i.test(text)) {
-        const response = `## 🤖 Cursor Code 助手\n\n我是一个本地 AI 编程助手，运行在 Electron 桌面应用中。\n\n### 我的能力\n\n- 📂 **文件操作**: 读取、写入、编辑文件\n- ⚙️ **命令执行**: 运行任何 shell 命令\n- 🔍 **代码搜索**: Glob 和 Grep 搜索\n- 🌐 **网络请求**: 调用 API，获取 JSON\n- 💬 **智能对话**: 理解自然语言\n\n### 使用方法\n\n**斜杠命令**: \`/read package.json\`, \`/bash npm install\`\n\n**自然语言**: "读取 package.json", "执行 npm install", "查找所有 ts 文件"\n\n**直接命令**: \`git status\`, \`npm run build\`\n\n输入 \`/help\` 查看完整命令列表。`;
+        const response = `## 🤖 Sparks 助手\n\n我是一个本地 AI 编程助手，运行在 Electron 桌面应用中。\n\n### 我的能力\n\n- 📂 **文件操作**: 读取、写入、编辑文件\n- ⚙️ **命令执行**: 运行任何 shell 命令\n- 🔍 **代码搜索**: Glob 和 Grep 搜索\n- 🌐 **网络请求**: 调用 API，获取 JSON\n- 💬 **智能对话**: 理解自然语言\n\n### 使用方法\n\n**斜杠命令**: \`/read package.json\`, \`/bash npm install\`\n\n**自然语言**: "读取 package.json", "执行 npm install", "查找所有 ts 文件"\n\n**直接命令**: \`git status\`, \`npm run build\`\n\n输入 \`/help\` 查看完整命令列表。`;
         return { response, toolResults: [] };
     }
     
     // ========== 简单问候/测试 ==========
     if (/^[1-9]$|^test$|^hello$|^hi$|^你好$|^测试$|^hey$|^哈喽$|^嗨$/i.test(text)) {
-        const response = `## 👋 你好！\n\n我是 Cursor Code 助手，随时准备帮助你！\n\n尝试以下操作：\n- \`/read package.json\` - 读取文件\n- \`npm install\` - 执行命令\n- "查找所有 ts 文件" - 搜索文件\n- \`/help\` - 查看帮助`;
+        const response = `## 👋 你好！\n\n我是 Sparks 助手，随时准备帮助你！\n\n尝试以下操作：\n- \`/read package.json\` - 读取文件\n- \`npm install\` - 执行命令\n- "查找所有 ts 文件" - 搜索文件\n- \`/help\` - 查看帮助`;
         return { response, toolResults: [] };
     }
     
     // ========== 纯数字（可能是测试） ==========
     if (/^\d+$/.test(text)) {
-        const response = `## 👋 收到数字: ${text}\n\n我是 Cursor Code 助手。你可以：\n- 输入命令如 \`npm install\`\n- 使用自然语言如 "读取 package.json"\n- 输入 \`/help\` 查看帮助`;
+        const response = `## 👋 收到数字: ${text}\n\n我是 Sparks 助手。你可以：\n- 输入命令如 \`npm install\`\n- 使用自然语言如 "读取 package.json"\n- 输入 \`/help\` 查看帮助`;
         return { response, toolResults: [] };
     }
     
@@ -4314,6 +4634,28 @@ ipcMain.handle('clear-history', async () => {
     return { success: true };
 });
 
+// ==================== IPC: 权限模式管理 ====================
+ipcMain.handle('set-permission-mode', (e, mode) => {
+    permissionMode = mode;
+    console.log(`[Permission] Mode set to: ${mode}`);
+    return { success: true, mode };
+});
+
+ipcMain.handle('get-permission-mode', () => {
+    return permissionMode;
+});
+
+// 处理工具确认响应
+ipcMain.handle('tool-confirm-response', (e, { requestId, approved }) => {
+    const pending = pendingConfirmations.get(requestId);
+    if (pending) {
+        pending.resolve(approved);
+        pendingConfirmations.delete(requestId);
+        console.log(`[Permission] Tool ${approved ? 'approved' : 'denied'} for request: ${requestId}`);
+    }
+    return { success: true };
+});
+
 // 获取对话历史长度（用于调试）
 ipcMain.handle('get-history-length', async () => {
     return conversationHistory.length;
@@ -4344,6 +4686,866 @@ ipcMain.handle('chat-stop', async () => {
     
     return { success: true };
 });
+
+// ==================== IPC: 设置厂商配置 ====================
+ipcMain.handle('set-provider-config', async (event, { provider, config }) => {
+    providersConfig[provider] = { ...providersConfig[provider], ...config };
+    saveProvidersConfig();
+    
+    // 重新初始化该厂商客户端
+    if (provider === 'cursor2api') {
+        if (config.enabled) {
+            try {
+                providerClients.cursor2api = new Anthropic({
+                    apiKey: config.apiKey,
+                    baseURL: config.baseUrl,
+                });
+                // 同步更新旧的 anthropicClient
+                anthropicClient = providerClients.cursor2api;
+                claudeConfig = { baseUrl: config.baseUrl, apiKey: config.apiKey, enabled: config.enabled };
+                console.log('[cursor2api] Client re-initialized');
+            } catch (e) {
+                console.error('[cursor2api] Re-init failed:', e.message);
+            }
+        }
+    } else {
+        initProviderClient(provider);
+    }
+    
+    console.log(`[${provider}] Config updated`);
+    return { success: true };
+});
+
+// ==================== IPC: 获取厂商配置 ====================
+ipcMain.handle('get-provider-config', async (event, provider) => {
+    const config = providersConfig[provider];
+    return {
+        ...config,
+        apiKey: config.apiKey ? '***' + config.apiKey.slice(-4) : '',
+    };
+});
+
+// ==================== IPC: 统一的多厂商聊天接口 ====================
+ipcMain.handle('chat-with-provider', async (event, { provider, config, userText, images, model, isRemoteMode: clientRemoteMode, remoteCwd: clientRemoteCwd }) => {
+    isChatStopped = false;
+    chatAbortController = new AbortController();
+    console.log(`[Chat] Provider: ${provider}, Model: ${model}`);
+    
+    try {
+        let response, toolResults;
+        
+        switch (provider) {
+            case 'cursor2api':
+                // 使用现有的 cursor2api 逻辑（Anthropic SDK）
+                if (!providerClients.cursor2api && !anthropicClient) {
+                    throw new Error('cursor2api 客户端未初始化，请检查配置');
+                }
+                ({ response, toolResults } = await runClaudeAgenticLoop(userText, images));
+                break;
+                
+            case 'anthropic':
+                // Anthropic 直连
+                if (!providerClients.anthropic) {
+                    initProviderClient('anthropic');
+                }
+                if (!providerClients.anthropic) {
+                    throw new Error('Anthropic API 未配置，请先设置 API Key');
+                }
+                ({ response, toolResults } = await runAnthropicDirectLoop(userText, images, model));
+                break;
+                
+            case 'openai':
+            case 'deepseek':
+            case 'qwen':
+            case 'custom':
+                // OpenAI 兼容的厂商
+                if (!providerClients[provider]) {
+                    initProviderClient(provider);
+                }
+                if (!providerClients[provider]) {
+                    throw new Error(`${provider} API 未配置，请先设置 API Key`);
+                }
+                ({ response, toolResults } = await runOpenAICompatibleLoop(provider, userText, images, model));
+                break;
+                
+            case 'google':
+                // Google Gemini (使用 REST API)
+                if (!providersConfig.google.apiKey) {
+                    throw new Error('Google API 未配置，请先设置 API Key');
+                }
+                ({ response, toolResults } = await runGoogleGeminiLoop(userText, images, model));
+                break;
+                
+            default:
+                throw new Error(`不支持的厂商: ${provider}`);
+        }
+        
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-end', { response, toolResults, savedFiles: [] });
+        }
+        
+        return { success: true, response, toolResults };
+        
+    } catch (err) {
+        console.error(`[${provider}] Error:`, err);
+        const errorMsg = `API 错误: ${err.message}`;
+        
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', `\n\n❌ ${errorMsg}`);
+            mainWindow.webContents.send('chat-end', { response: errorMsg, toolResults: [] });
+        }
+        
+        return { success: false, error: err.message };
+    }
+});
+
+// ==================== Anthropic 直连循环 ====================
+async function runAnthropicDirectLoop(userText, images, model) {
+    const client = providerClients.anthropic;
+    const userMessage = { role: 'user', content: userText };
+    addToConversationHistory(userMessage);
+    
+    let fullResponse = '';
+    const allToolResults = [];
+    const MAX_TURNS = 20;
+    
+    for (let turn = 0; turn < MAX_TURNS; turn++) {
+        if (isChatStopped) break;
+        
+        console.log(`[Anthropic] Turn ${turn + 1}/${MAX_TURNS}`);
+        
+        const stream = await client.messages.stream({
+            model: model || providersConfig.anthropic.selectedModel,
+            max_tokens: 8192,
+            system: getSystemPrompt(),
+            messages: getConversationHistory(),
+            tools: Object.values(TOOLS).map(tool => ({
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.inputSchema || { type: 'object', properties: {} }
+            })),
+        });
+        
+        let currentText = '';
+        const toolCalls = [];
+        
+        for await (const event of stream) {
+            if (isChatStopped) break;
+            
+            if (event.type === 'content_block_delta') {
+                if (event.delta.type === 'text_delta') {
+                    currentText += event.delta.text;
+                    fullResponse += event.delta.text;
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('chat-stream', event.delta.text);
+                    }
+                }
+            } else if (event.type === 'content_block_start') {
+                if (event.content_block.type === 'tool_use') {
+                    toolCalls.push({
+                        id: event.content_block.id,
+                        name: event.content_block.name,
+                        input: {},
+                    });
+                }
+            } else if (event.type === 'content_block_delta') {
+                if (event.delta.type === 'input_json_delta' && toolCalls.length > 0) {
+                    const lastTool = toolCalls[toolCalls.length - 1];
+                    try {
+                        lastTool.input = JSON.parse(JSON.stringify(lastTool.input) + event.delta.partial_json);
+                    } catch (e) {}
+                }
+            }
+        }
+        
+        // 处理工具调用
+        if (toolCalls.length > 0) {
+            const toolResults = [];
+            for (const call of toolCalls) {
+                const result = await handleToolCall(call.name, call.input);
+                toolResults.push({
+                    type: 'tool_result',
+                    tool_use_id: call.id,
+                    content: typeof result === 'string' ? result : JSON.stringify(result),
+                });
+                // 格式化工具结果以匹配前端期望的格式
+                const isSuccess = result && (result.success !== false);
+                allToolResults.push({ 
+                    tool: call.name, 
+                    input: call.input, 
+                    success: isSuccess,
+                    data: isSuccess ? result : undefined,
+                    error: !isSuccess ? (result?.error || '执行失败') : undefined,
+                });
+            }
+            addToConversationHistory({ role: 'assistant', content: [{ type: 'text', text: currentText }, ...toolCalls.map(t => ({ type: 'tool_use', id: t.id, name: t.name, input: t.input }))] });
+            addToConversationHistory({ role: 'user', content: toolResults });
+        } else {
+            addToConversationHistory({ role: 'assistant', content: currentText });
+            break;
+        }
+    }
+    
+    return { response: fullResponse, toolResults: allToolResults };
+}
+
+// ==================== 模型类型判断和路由 ====================
+
+// 获取模型类型
+function getModelType(modelId) {
+    const lowerModel = modelId.toLowerCase();
+    
+    // Embedding 模型
+    if (lowerModel.includes('embedding') || lowerModel === 'text-embedding-ada-002') {
+        return 'embedding';
+    }
+    
+    // 语音合成模型
+    if (lowerModel.includes('tts')) {
+        return 'tts';
+    }
+    
+    // 语音识别模型
+    if (lowerModel.includes('whisper') || lowerModel.includes('transcribe')) {
+        return 'transcription';
+    }
+    
+    // 图像生成模型
+    if (lowerModel.includes('dall-e') || lowerModel.includes('gpt-image') || lowerModel.includes('chatgpt-image')) {
+        return 'image';
+    }
+    
+    // 视频生成模型
+    if (lowerModel.includes('sora')) {
+        return 'video';
+    }
+    
+    // 内容审核模型
+    if (lowerModel.includes('moderation')) {
+        return 'moderation';
+    }
+    
+    // 实时语音模型
+    if (lowerModel.includes('realtime')) {
+        return 'realtime';
+    }
+    
+    // 音频模型 (不包含 audio-preview 这种聊天模型)
+    if ((lowerModel.includes('gpt-audio') || lowerModel === 'gpt-audio-mini') && 
+        !lowerModel.includes('preview')) {
+        return 'audio';
+    }
+    
+    // 官方 Completions API 只支持这 3 个旧模型
+    // 参考: https://platform.openai.com/docs/api-reference/completions
+    if (lowerModel === 'gpt-3.5-turbo-instruct' || 
+        lowerModel === 'gpt-3.5-turbo-instruct-0914' ||
+        lowerModel === 'davinci-002' || 
+        lowerModel === 'babbage-002') {
+        return 'completion';
+    }
+    
+    // GPT-5 Codex 系列模型使用 Responses API (/v1/responses)
+    // 参考: https://developers.openai.com/api/docs/models/gpt-5-codex
+    if (lowerModel.includes('codex')) {
+        return 'responses';
+    }
+    
+    // 所有其他 GPT-5.x, GPT-4.x, O系列模型使用 Chat Completions API
+    return 'chat';
+}
+
+// 根据模型类型运行对应的 API
+async function runModelByType(client, model, userText, provider) {
+    const modelType = getModelType(model);
+    console.log(`[Model] ${model} -> type: ${modelType}`);
+    
+    switch (modelType) {
+        case 'chat':
+            return null; // 返回 null 表示继续使用标准聊天流程
+            
+        case 'completion':
+            return await runCompletionModel(client, model, userText);
+        
+        case 'responses':
+            return await runResponsesModel(client, model, userText, provider);
+            
+        case 'embedding':
+            return await runEmbeddingModel(client, model, userText);
+            
+        case 'image':
+            return await runImageModel(client, model, userText);
+            
+        case 'tts':
+            return showModelNotSupported(model, '语音合成', '用于文字转语音');
+            
+        case 'transcription':
+            return showModelNotSupported(model, '语音识别', '用于语音转文字，需要上传音频文件');
+            
+        case 'video':
+            return showModelNotSupported(model, '视频生成', '用于生成视频');
+            
+        case 'moderation':
+            return await runModerationModel(client, model, userText);
+            
+        case 'realtime':
+            return showModelNotSupported(model, '实时语音', '需要 WebSocket 连接');
+            
+        case 'audio':
+            return showModelNotSupported(model, '音频处理', '需要特殊 API');
+            
+        default:
+            return null;
+    }
+}
+
+// 显示不支持的模型提示
+function showModelNotSupported(model, typeName, desc) {
+    const msg = `ℹ️ **${model}** 是${typeName}模型，${desc}，不支持文字对话。\n\n请选择聊天模型（如 GPT-5.4、GPT-4o 等）进行对话。`;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('chat-stream', msg);
+    }
+    return { response: msg, toolResults: [] };
+}
+
+// 运行 Responses API 模型 (GPT-5 Codex 系列)
+// 参考: https://developers.openai.com/api/docs/models/gpt-5-codex
+async function runResponsesModel(client, model, userText, provider) {
+    console.log(`[Responses] Using /v1/responses for Codex model: ${model}`);
+    
+    let fullResponse = '';
+    const config = providersConfig[provider] || {};
+    const baseURL = config.baseUrl || 'https://api.openai.com/v1';
+    const apiKey = config.apiKey || '';
+    
+    try {
+        // Responses API 使用 HTTP 请求
+        const https = require('https');
+        const url = require('url');
+        
+        // 获取代理设置
+        let agent = null;
+        if (config.useProxy && config.proxyUrl) {
+            const HttpsProxyAgent = require('https-proxy-agent');
+            agent = new HttpsProxyAgent(config.proxyUrl);
+        }
+        
+        const responseUrl = baseURL.replace(/\/v1\/?$/, '') + '/v1/responses';
+        
+        const requestBody = JSON.stringify({
+            model: model,
+            input: userText,
+            instructions: "You are a helpful coding assistant. Answer the user's question clearly and provide code examples when appropriate.",
+        });
+        
+        const parsedUrl = new URL(responseUrl);
+        
+        const options = {
+            hostname: parsedUrl.hostname,
+            port: parsedUrl.port || 443,
+            path: parsedUrl.pathname,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Length': Buffer.byteLength(requestBody),
+            },
+            agent: agent,
+        };
+        
+        const result = await new Promise((resolve, reject) => {
+            const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', chunk => { data += chunk; });
+                res.on('end', () => {
+                    if (res.statusCode >= 200 && res.statusCode < 300) {
+                        try {
+                            resolve(JSON.parse(data));
+                        } catch (e) {
+                            reject(new Error(`Failed to parse response: ${data}`));
+                        }
+                    } else {
+                        reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+                    }
+                });
+            });
+            
+            req.on('error', reject);
+            req.write(requestBody);
+            req.end();
+        });
+        
+        // 解析 Responses API 响应
+        // 格式: { id, object, output: [...], ... }
+        if (result.output && Array.isArray(result.output)) {
+            for (const item of result.output) {
+                if (item.type === 'message' && item.content) {
+                    for (const content of item.content) {
+                        if (content.type === 'output_text' || content.type === 'text') {
+                            fullResponse += content.text || '';
+                        }
+                    }
+                }
+            }
+        } else if (result.error) {
+            throw new Error(result.error.message || JSON.stringify(result.error));
+        }
+        
+        if (fullResponse) {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('chat-stream', fullResponse);
+            }
+            addToConversationHistory({ role: 'user', content: userText });
+            addToConversationHistory({ role: 'assistant', content: fullResponse });
+        }
+        
+        return { response: fullResponse, toolResults: [] };
+    } catch (err) {
+        console.error(`[Responses] Error:`, err);
+        const errorMsg = `⚠️ **${model}** (Codex) 调用失败: ${err.message}\n\n这是 Codex 专用模型，使用 Responses API。\n如需普通对话，请选择 GPT-5.4 或其他聊天模型。`;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', errorMsg);
+        }
+        return { response: errorMsg, toolResults: [] };
+    }
+}
+
+// 运行 Completion 模型 (Codex, Instruct, Davinci, Babbage)
+async function runCompletionModel(client, model, userText) {
+    console.log(`[Completion] Using /v1/completions for model: ${model}`);
+    
+    let fullResponse = '';
+    
+    try {
+        // 构建代码补全的 prompt
+        const prompt = `### Task:\n${userText}\n\n### Response:\n`;
+        
+        const response = await client.completions.create({
+            model: model,
+            prompt: prompt,
+            max_tokens: 4096,
+            temperature: 0.7,
+            stream: true,
+        });
+        
+        for await (const chunk of response) {
+            if (isChatStopped) break;
+            const text = chunk.choices[0]?.text || '';
+            if (text) {
+                fullResponse += text;
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('chat-stream', text);
+                }
+            }
+        }
+        
+        addToConversationHistory({ role: 'user', content: userText });
+        addToConversationHistory({ role: 'assistant', content: fullResponse });
+        
+        return { response: fullResponse, toolResults: [] };
+    } catch (err) {
+        console.error(`[Completion] Error:`, err);
+        const errorMsg = `⚠️ **${model}** 模型调用失败: ${err.message}\n\n这可能是因为该模型不支持此接口，请尝试选择其他聊天模型。`;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', errorMsg);
+        }
+        return { response: errorMsg, toolResults: [] };
+    }
+}
+
+// 运行 Embedding 模型
+async function runEmbeddingModel(client, model, userText) {
+    console.log(`[Embedding] Using /v1/embeddings for model: ${model}`);
+    
+    try {
+        const response = await client.embeddings.create({
+            model: model,
+            input: userText,
+        });
+        
+        const embedding = response.data[0].embedding;
+        const dimensions = embedding.length;
+        const preview = embedding.slice(0, 5).map(n => n.toFixed(4)).join(', ');
+        
+        const resultMsg = `✅ **${model}** Embedding 生成成功！\n\n` +
+            `- **维度**: ${dimensions}\n` +
+            `- **输入文本**: "${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"\n` +
+            `- **向量预览**: [${preview}, ...]\n\n` +
+            `> 完整向量已生成，共 ${dimensions} 维浮点数。`;
+        
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', resultMsg);
+        }
+        
+        return { response: resultMsg, toolResults: [] };
+    } catch (err) {
+        console.error(`[Embedding] Error:`, err);
+        const errorMsg = `⚠️ **${model}** Embedding 失败: ${err.message}`;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', errorMsg);
+        }
+        return { response: errorMsg, toolResults: [] };
+    }
+}
+
+// 运行图像生成模型
+async function runImageModel(client, model, userText) {
+    console.log(`[Image] Using /v1/images/generations for model: ${model}`);
+    
+    try {
+        // 根据模型选择参数
+        const params = {
+            model: model,
+            prompt: userText,
+            n: 1,
+            size: '1024x1024',
+        };
+        
+        // DALL-E 3 支持更多参数
+        if (model.includes('dall-e-3')) {
+            params.quality = 'standard';
+        }
+        
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', `🎨 正在使用 **${model}** 生成图像...\n\n`);
+        }
+        
+        const response = await client.images.generate(params);
+        
+        const imageUrl = response.data[0].url || response.data[0].b64_json;
+        const revisedPrompt = response.data[0].revised_prompt;
+        
+        let resultMsg = `✅ 图像生成成功！\n\n`;
+        if (revisedPrompt) {
+            resultMsg += `**优化后的提示词**: ${revisedPrompt}\n\n`;
+        }
+        resultMsg += `**图像链接**: ${imageUrl}\n\n`;
+        resultMsg += `![Generated Image](${imageUrl})`;
+        
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', resultMsg);
+        }
+        
+        return { response: resultMsg, toolResults: [] };
+    } catch (err) {
+        console.error(`[Image] Error:`, err);
+        const errorMsg = `⚠️ **${model}** 图像生成失败: ${err.message}`;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', errorMsg);
+        }
+        return { response: errorMsg, toolResults: [] };
+    }
+}
+
+// 运行内容审核模型
+async function runModerationModel(client, model, userText) {
+    console.log(`[Moderation] Using /v1/moderations for model: ${model}`);
+    
+    try {
+        const response = await client.moderations.create({
+            model: model,
+            input: userText,
+        });
+        
+        const result = response.results[0];
+        const flagged = result.flagged;
+        const categories = result.categories;
+        const scores = result.category_scores;
+        
+        let resultMsg = `🔍 **${model}** 内容审核结果\n\n`;
+        resultMsg += `**是否违规**: ${flagged ? '⚠️ 是' : '✅ 否'}\n\n`;
+        resultMsg += `**分类详情**:\n`;
+        
+        for (const [category, value] of Object.entries(categories)) {
+            const score = (scores[category] * 100).toFixed(2);
+            const icon = value ? '🔴' : '🟢';
+            resultMsg += `- ${icon} ${category}: ${score}%\n`;
+        }
+        
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', resultMsg);
+        }
+        
+        return { response: resultMsg, toolResults: [] };
+    } catch (err) {
+        console.error(`[Moderation] Error:`, err);
+        const errorMsg = `⚠️ **${model}** 内容审核失败: ${err.message}`;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-stream', errorMsg);
+        }
+        return { response: errorMsg, toolResults: [] };
+    }
+}
+
+// ==================== OpenAI 兼容厂商循环 ====================
+async function runOpenAICompatibleLoop(provider, userText, images, model) {
+    const client = providerClients[provider];
+    const config = providersConfig[provider];
+    const selectedModel = model || config.selectedModel;
+    
+    // 根据模型类型自动路由到对应的 API
+    const specialResult = await runModelByType(client, selectedModel, userText, provider);
+    if (specialResult !== null) {
+        // 非聊天模型已处理完毕
+        return specialResult;
+    }
+    
+    // 以下是标准聊天模型流程
+    const userMessage = { role: 'user', content: userText };
+    addToConversationHistory(userMessage);
+    
+    const messages = [
+        { role: 'system', content: getSystemPrompt() },
+        ...getConversationHistory()
+    ];
+    
+    const tools = Object.values(TOOLS).map(tool => ({
+        type: 'function',
+        function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.inputSchema || { type: 'object', properties: {} }
+        }
+    }));
+    
+    let fullResponse = '';
+    const allToolResults = [];
+    const MAX_TURNS = 20;
+    
+    for (let turn = 0; turn < MAX_TURNS; turn++) {
+        if (isChatStopped) break;
+        
+        console.log(`[${provider}] Turn ${turn + 1}/${MAX_TURNS}`);
+        
+        // GPT-5.x 和新模型使用 max_completion_tokens，旧模型使用 max_tokens
+        const isNewModel = selectedModel.startsWith('gpt-5') || 
+                          selectedModel.startsWith('o3') || 
+                          selectedModel.startsWith('o4') ||
+                          selectedModel.startsWith('gpt-4.1');
+        
+        const requestParams = {
+            model: selectedModel,
+            messages,
+            tools,
+            tool_choice: 'auto',
+            stream: true,
+        };
+        
+        // 添加适当的 token 限制参数
+        if (isNewModel) {
+            requestParams.max_completion_tokens = 8192;
+        } else {
+            requestParams.max_tokens = 4096;
+        }
+        
+        const response = await client.chat.completions.create(requestParams);
+        
+        let currentContent = '';
+        const toolCalls = [];
+        let currentToolCall = null;
+        
+        for await (const chunk of response) {
+            if (isChatStopped) break;
+            
+            const delta = chunk.choices[0]?.delta;
+            if (!delta) continue;
+            
+            if (delta.content) {
+                currentContent += delta.content;
+                fullResponse += delta.content;
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('chat-stream', delta.content);
+                }
+            }
+            
+            if (delta.tool_calls) {
+                for (const tc of delta.tool_calls) {
+                    if (tc.index !== undefined) {
+                        while (toolCalls.length <= tc.index) {
+                            toolCalls.push({ id: '', name: '', arguments: '' });
+                        }
+                        if (tc.id) toolCalls[tc.index].id = tc.id;
+                        if (tc.function?.name) toolCalls[tc.index].name = tc.function.name;
+                        if (tc.function?.arguments) toolCalls[tc.index].arguments += tc.function.arguments;
+                    }
+                }
+            }
+        }
+        
+        // 处理工具调用
+        if (toolCalls.length > 0 && toolCalls.some(tc => tc.name)) {
+            messages.push({
+                role: 'assistant',
+                content: currentContent || null,
+                tool_calls: toolCalls.filter(tc => tc.name).map(tc => ({
+                    id: tc.id,
+                    type: 'function',
+                    function: { name: tc.name, arguments: tc.arguments }
+                }))
+            });
+            
+            for (const tc of toolCalls.filter(tc => tc.name)) {
+                let input = {};
+                try { input = JSON.parse(tc.arguments); } catch (e) {}
+                
+                const result = await handleToolCall(tc.name, input);
+                
+                // 格式化工具结果以匹配前端期望的格式
+                const isSuccess = result && (result.success !== false);
+                allToolResults.push({ 
+                    tool: tc.name, 
+                    input, 
+                    success: isSuccess,
+                    data: isSuccess ? result : undefined,
+                    error: !isSuccess ? (result?.error || '执行失败') : undefined,
+                });
+                
+                messages.push({
+                    role: 'tool',
+                    tool_call_id: tc.id,
+                    content: typeof result === 'string' ? result : JSON.stringify(result),
+                });
+            }
+        } else {
+            addToConversationHistory({ role: 'assistant', content: currentContent });
+            break;
+        }
+    }
+    
+    return { response: fullResponse, toolResults: allToolResults };
+}
+
+// ==================== Google Gemini 循环 ====================
+async function runGoogleGeminiLoop(userText, images, model) {
+    const config = providersConfig.google;
+    const apiKey = config.apiKey;
+    const baseUrl = config.baseUrl;
+    const modelName = model || config.selectedModel;
+    
+    const userMessage = { role: 'user', content: userText };
+    addToConversationHistory(userMessage);
+    
+    let fullResponse = '';
+    const allToolResults = [];
+    const MAX_TURNS = 20;
+    
+    // 构建 Gemini 格式的工具
+    const tools = [{
+        function_declarations: Object.values(TOOLS).map(tool => ({
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.inputSchema || { type: 'object', properties: {} }
+        }))
+    }];
+    
+    // 构建历史消息（Gemini 格式）
+    const contents = getConversationHistory().map(msg => ({
+        role: msg.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content) }]
+    }));
+    
+    // 创建 fetch 函数（可能带代理）
+    let fetchFn = fetch;
+    if (config.useProxy && config.proxyUrl) {
+        fetchFn = createProxiedFetch(config.proxyUrl);
+    }
+    
+    for (let turn = 0; turn < MAX_TURNS; turn++) {
+        if (isChatStopped) break;
+        
+        console.log(`[Google] Turn ${turn + 1}/${MAX_TURNS}`);
+        
+        const url = `${baseUrl}/models/${modelName}:streamGenerateContent?key=${apiKey}&alt=sse`;
+        
+        const response = await fetchFn(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents,
+                tools,
+                generationConfig: { maxOutputTokens: 8192 },
+            }),
+        });
+        
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Gemini API error: ${response.status} - ${errText}`);
+        }
+        
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let currentText = '';
+        const functionCalls = [];
+        
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+            
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        if (data.candidates?.[0]?.content?.parts) {
+                            for (const part of data.candidates[0].content.parts) {
+                                if (part.text) {
+                                    currentText += part.text;
+                                    fullResponse += part.text;
+                                    if (mainWindow && !mainWindow.isDestroyed()) {
+                                        mainWindow.webContents.send('chat-stream', part.text);
+                                    }
+                                }
+                                if (part.functionCall) {
+                                    functionCalls.push(part.functionCall);
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                }
+            }
+        }
+        
+        // 处理函数调用
+        if (functionCalls.length > 0) {
+            contents.push({
+                role: 'model',
+                parts: [
+                    ...(currentText ? [{ text: currentText }] : []),
+                    ...functionCalls.map(fc => ({ functionCall: fc }))
+                ]
+            });
+            
+            const functionResponses = [];
+            for (const fc of functionCalls) {
+                const result = await handleToolCall(fc.name, fc.args || {});
+                // 格式化工具结果以匹配前端期望的格式
+                const isSuccess = result && (result.success !== false);
+                allToolResults.push({ 
+                    tool: fc.name, 
+                    input: fc.args, 
+                    success: isSuccess,
+                    data: isSuccess ? result : undefined,
+                    error: !isSuccess ? (result?.error || '执行失败') : undefined,
+                });
+                functionResponses.push({
+                    functionResponse: {
+                        name: fc.name,
+                        response: { result: typeof result === 'string' ? result : JSON.stringify(result) }
+                    }
+                });
+            }
+            
+            contents.push({ role: 'user', parts: functionResponses });
+        } else {
+            addToConversationHistory({ role: 'assistant', content: currentText });
+            break;
+        }
+    }
+    
+    return { response: fullResponse, toolResults: allToolResults };
+}
 
 // ==================== IPC: 使用 Claude API 聊天（通过 cursor2api） ====================
 ipcMain.handle('chat-claude', async (event, { userText, images, model, isRemoteMode: clientRemoteMode, remoteCwd: clientRemoteCwd }) => {
@@ -4652,9 +5854,9 @@ ipcMain.handle('chat', async (event, { model, messages, userText, images }) => {
         console.log('[Intercept] Simple input detected, returning local greeting');
         let response;
         if (/^\d+$/.test(simpleInputText)) {
-            response = `## 👋 收到数字: ${simpleInputText}\n\n我是 Cursor Code 助手。你可以：\n- 输入命令如 \`npm install\`\n- 使用自然语言如 "读取 package.json"\n- 输入 \`/help\` 查看帮助`;
+            response = `## 👋 收到数字: ${simpleInputText}\n\n我是 Sparks 助手。你可以：\n- 输入命令如 \`npm install\`\n- 使用自然语言如 "读取 package.json"\n- 输入 \`/help\` 查看帮助`;
         } else {
-            response = `## 👋 你好！\n\n我是 Cursor Code 助手，随时准备帮助你！\n\n尝试以下操作：\n- \`/read package.json\` - 读取文件\n- \`npm install\` - 执行命令\n- "查找所有 ts 文件" - 搜索文件\n- \`/help\` - 查看帮助`;
+            response = `## 👋 你好！\n\n我是 Sparks 助手，随时准备帮助你！\n\n尝试以下操作：\n- \`/read package.json\` - 读取文件\n- \`npm install\` - 执行命令\n- "查找所有 ts 文件" - 搜索文件\n- \`/help\` - 查看帮助`;
         }
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('chat-stream', response);
