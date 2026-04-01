@@ -33,7 +33,7 @@
     "eject": "react-scripts eject",
     "electron": "cross-env NODE_ENV=development electron . --dev",
     "electron:dev": "concurrently \"npm start\" \"wait-on http://localhost:3000 && npm run electron\"",
-    "electron:build": "npm run build && electron-builder --win portable"
+    "electron:build": "npm run build && electron-builder --win"
   },
   "eslintConfig": {
     "extends": [

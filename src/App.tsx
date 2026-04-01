@@ -260,7 +260,7 @@ function App() {
   };
 
   const deleteSSHConfig = async (configId: string) => {
-    if (confirm('确定要删除此连接配置吗？')) {
+    if (window.confirm('确定要删除此连接配置吗？')) {
       await ipcRenderer.invoke('ssh-delete-config', configId);
       await loadSSHConfigs();
       showNotification('✅ 配置已删除');
