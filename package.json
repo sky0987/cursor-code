@@ -82,6 +82,13 @@
       "build/**/*",
       "public/electron.js"
     ],
-    "forceCodeSigning": false
+    "forceCodeSigning": false,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "sky0987",
+        "repo": "cursor-code"
+      }
+    ]
   }
 }
