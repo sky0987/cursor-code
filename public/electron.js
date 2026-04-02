@@ -1227,7 +1227,51 @@ function createWindow() {
         mainWindow.loadURL('http://localhost:3000');
         mainWindow.webContents.openDevTools();
     } else {
-        mainWindow.loadFile(path.join(__dirname, '../build/index.html'));
+        // 打包后路径结构:
+        // app.asar/
+        //   ├── build/index.html
+        //   └── public/electron.js  <-- __dirname 指向这里
+        // 所以从 public 向上一级到 app.asar，再进入 build
+        const buildPath = path.join(__dirname, '..', 'build', 'index.html');
+        
+        console.log('[Electron] Production mode');
+        console.log('[Electron] __dirname:', __dirname);
+        console.log('[Electron] buildPath:', buildPath);
+        
+        // 检查文件是否存在（需要处理 asar）
+        const existsPath = buildPath.replace('app.asar', 'app.asar.unpacked');
+        const fileExists = fs.existsSync(buildPath) || fs.existsSync(existsPath);
+        console.log('[Electron] File exists:', fileExists);
+        
+        if (!fileExists) {
+            // 尝试备用路径
+            const altPath = path.join(app.getAppPath(), 'build', 'index.html');
+            console.log('[Electron] Trying alt path:', altPath);
+            mainWindow.loadFile(altPath);
+        } else {
+            mainWindow.loadFile(buildPath);
+        }
+        
+        // 监听加载失败
+        mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+            console.error('[Electron] Failed to load:', errorCode, errorDescription);
+            // 显示错误页面
+            mainWindow.loadURL(`data:text/html,
+                <html>
+                <head><style>
+                    body { background: #1a1a2e; color: #fff; font-family: sans-serif; padding: 40px; }
+                    h1 { color: #ff6b6b; }
+                    pre { background: #0d0d1a; padding: 20px; border-radius: 8px; overflow: auto; }
+                </style></head>
+                <body>
+                    <h1>加载失败</h1>
+                    <p>错误代码: ${errorCode}</p>
+                    <p>${errorDescription}</p>
+                    <pre>__dirname: ${__dirname}\nbuildPath: ${buildPath}\nappPath: ${app.getAppPath()}</pre>
+                </body>
+                </html>
+            `);
+        });
     }
     
     mainWindow.setMenuBarVisibility(false);
@@ -2058,7 +2102,1151 @@ const TOOLS = {
             }
         }
     },
+    
+    // ==================== Claude Code 新增工具 ====================
+    
+    /**
+     * Delete 工具 - 删除文件
+     */
+    Delete: {
+        name: 'Delete',
+        description: '删除指定路径的文件',
+        isReadOnly: false,
+        async call({ file_path }, context) {
+            const fullPath = path.isAbsolute(file_path) ? file_path : path.join(workingDirectory, file_path);
+            
+            if (!fs.existsSync(fullPath)) {
+                return {
+                    success: false,
+                    error: `文件不存在: ${file_path}`,
+                };
+            }
+            
+            const stats = fs.statSync(fullPath);
+            if (stats.isDirectory()) {
+                return {
+                    success: false,
+                    error: `路径是目录，不是文件: ${file_path}`,
+                };
+            }
+            
+            fs.unlinkSync(fullPath);
+            console.log(`[Delete] Deleted: ${fullPath}`);
+            
+            return {
+                success: true,
+                filePath: fullPath,
+                message: `文件已删除: ${file_path}`,
+            };
+        }
+    },
+    
+    /**
+     * LS 工具 - 列出目录内容
+     */
+    LS: {
+        name: 'LS',
+        description: '列出目录内容',
+        isReadOnly: true,
+        async call({ path: dirPath, all = false, long = true }, context) {
+            const fullPath = dirPath 
+                ? (path.isAbsolute(dirPath) ? dirPath : path.join(workingDirectory, dirPath))
+                : workingDirectory;
+            
+            if (!fs.existsSync(fullPath)) {
+                throw new Error(`目录不存在: ${dirPath || '.'}`);
+            }
+            
+            const entries = fs.readdirSync(fullPath, { withFileTypes: true });
+            const items = [];
+            
+            for (const entry of entries) {
+                // 跳过隐藏文件（除非指定 all）
+                if (!all && entry.name.startsWith('.')) continue;
+                
+                const itemPath = path.join(fullPath, entry.name);
+                const stats = fs.statSync(itemPath);
+                
+                if (long) {
+                    items.push({
+                        name: entry.name,
+                        type: entry.isDirectory() ? 'directory' : 'file',
+                        size: stats.size,
+                        modified: stats.mtime.toISOString(),
+                        permissions: stats.mode.toString(8).slice(-3),
+                    });
+                } else {
+                    items.push(entry.name + (entry.isDirectory() ? '/' : ''));
+                }
+            }
+            
+            return {
+                path: fullPath,
+                items,
+                count: items.length,
+            };
+        }
+    },
+    
+    /**
+     * NotebookEdit 工具 - 编辑 Jupyter Notebook
+     */
+    NotebookEdit: {
+        name: 'NotebookEdit',
+        description: '编辑 Jupyter Notebook 单元格',
+        isReadOnly: false,
+        async call({ target_notebook, cell_idx, is_new_cell, cell_language, old_string, new_string }, context) {
+            const fullPath = path.isAbsolute(target_notebook) 
+                ? target_notebook 
+                : path.join(workingDirectory, target_notebook);
+            
+            // 读取 notebook 文件
+            if (!fs.existsSync(fullPath)) {
+                if (!is_new_cell) {
+                    throw new Error(`Notebook 不存在: ${target_notebook}`);
+                }
+                // 创建新 notebook
+                const newNotebook = {
+                    cells: [],
+                    metadata: {
+                        kernelspec: {
+                            display_name: cell_language === 'python' ? 'Python 3' : cell_language,
+                            language: cell_language || 'python',
+                            name: cell_language || 'python3',
+                        },
+                        language_info: {
+                            name: cell_language || 'python',
+                        },
+                    },
+                    nbformat: 4,
+                    nbformat_minor: 5,
+                };
+                fs.writeFileSync(fullPath, JSON.stringify(newNotebook, null, 2), 'utf8');
+            }
+            
+            const notebook = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+            
+            if (is_new_cell) {
+                // 创建新单元格
+                const cellType = ['markdown', 'raw'].includes(cell_language) ? cell_language : 'code';
+                const newCell = {
+                    cell_type: cellType,
+                    metadata: {},
+                    source: new_string.split('\n'),
+                };
+                if (cellType === 'code') {
+                    newCell.execution_count = null;
+                    newCell.outputs = [];
+                }
+                
+                // 在指定位置插入
+                if (cell_idx >= notebook.cells.length) {
+                    notebook.cells.push(newCell);
+                } else {
+                    notebook.cells.splice(cell_idx, 0, newCell);
+                }
+                
+                fs.writeFileSync(fullPath, JSON.stringify(notebook, null, 2), 'utf8');
+                
+                return {
+                    success: true,
+                    action: 'created',
+                    cellIndex: cell_idx,
+                    notebook: target_notebook,
+                };
+            } else {
+                // 编辑现有单元格
+                if (cell_idx < 0 || cell_idx >= notebook.cells.length) {
+                    throw new Error(`单元格索引超出范围: ${cell_idx}`);
+                }
+                
+                const cell = notebook.cells[cell_idx];
+                const cellContent = Array.isArray(cell.source) ? cell.source.join('') : cell.source;
+                
+                if (!cellContent.includes(old_string)) {
+                    throw new Error(`在单元格 ${cell_idx} 中未找到要替换的文本`);
+                }
+                
+                const newContent = cellContent.replace(old_string, new_string);
+                cell.source = newContent.split('\n').map((line, i, arr) => 
+                    i < arr.length - 1 ? line + '\n' : line
+                );
+                
+                fs.writeFileSync(fullPath, JSON.stringify(notebook, null, 2), 'utf8');
+                
+                return {
+                    success: true,
+                    action: 'edited',
+                    cellIndex: cell_idx,
+                    notebook: target_notebook,
+                };
+            }
+        }
+    },
+    
+    /**
+     * TodoWrite 工具 - 任务管理
+     */
+    TodoWrite: {
+        name: 'TodoWrite',
+        description: '创建和管理任务列表',
+        isReadOnly: false,
+        _todos: new Map(),
+        
+        async call({ todos, merge = true }, context) {
+            const todoMap = this._todos;
+            
+            if (!merge) {
+                // 完全替换
+                todoMap.clear();
+            }
+            
+            for (const todo of todos) {
+                if (!todo.id || !todo.content || !todo.status) {
+                    continue;
+                }
+                
+                if (merge && todoMap.has(todo.id)) {
+                    // 合并更新
+                    const existing = todoMap.get(todo.id);
+                    todoMap.set(todo.id, {
+                        ...existing,
+                        ...todo,
+                        updatedAt: new Date().toISOString(),
+                    });
+                } else {
+                    // 新建
+                    todoMap.set(todo.id, {
+                        ...todo,
+                        createdAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                    });
+                }
+            }
+            
+            // 发送更新到前端
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('todos-updated', {
+                    todos: Array.from(todoMap.values()),
+                });
+            }
+            
+            return {
+                success: true,
+                todos: Array.from(todoMap.values()),
+                count: todoMap.size,
+            };
+        }
+    },
+    
+    /**
+     * Task 工具 - 子代理任务（简化版）
+     */
+    Task: {
+        name: 'Task',
+        description: '启动子代理执行复杂任务',
+        isReadOnly: false,
+        
+        async call({ description, prompt, subagent_type = 'generalPurpose', model, readonly = false }, context) {
+            const taskId = crypto.randomUUID();
+            const startTime = Date.now();
+            
+            console.log(`[Task] Starting subagent: ${description}`);
+            console.log(`[Task] Type: ${subagent_type}, Model: ${model || 'default'}`);
+            
+            // 发送任务开始事件
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('task-started', {
+                    taskId,
+                    description,
+                    subagentType: subagent_type,
+                });
+            }
+            
+            // 简化实现：将任务提示作为新消息发送
+            // 实际的子代理逻辑需要更复杂的实现
+            return {
+                success: true,
+                taskId,
+                description,
+                subagentType: subagent_type,
+                message: `任务已创建: ${description}`,
+                note: '子代理功能需要完整的多代理架构支持',
+            };
+        }
+    },
+    
+    /**
+     * AskQuestion 工具 - 向用户提问
+     */
+    AskQuestion: {
+        name: 'AskQuestion',
+        description: '向用户提出选择题收集结构化答案',
+        isReadOnly: true,
+        
+        async call({ title, questions }, context) {
+            // 验证问题格式
+            if (!questions || !Array.isArray(questions) || questions.length === 0) {
+                throw new Error('必须提供至少一个问题');
+            }
+            
+            for (const q of questions) {
+                if (!q.id || !q.prompt || !q.options || q.options.length < 2) {
+                    throw new Error('每个问题必须包含 id、prompt 和至少 2 个 options');
+                }
+            }
+            
+            // 发送问题到前端等待用户回答
+            return new Promise((resolve) => {
+                const questionId = crypto.randomUUID();
+                
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    // 发送问题
+                    mainWindow.webContents.send('ask-question', {
+                        questionId,
+                        title: title || '请回答以下问题',
+                        questions,
+                    });
+                    
+                    // 设置超时
+                    const timeout = setTimeout(() => {
+                        ipcMain.removeAllListeners(`question-answer-${questionId}`);
+                        resolve({
+                            success: false,
+                            error: '用户未在规定时间内回答',
+                            timeout: true,
+                        });
+                    }, 300000); // 5分钟超时
+                    
+                    // 等待回答
+                    ipcMain.once(`question-answer-${questionId}`, (event, answers) => {
+                        clearTimeout(timeout);
+                        resolve({
+                            success: true,
+                            answers,
+                        });
+                    });
+                } else {
+                    resolve({
+                        success: false,
+                        error: '窗口不可用',
+                    });
+                }
+            });
+        }
+    },
+    
+    /**
+     * SemanticSearch 工具 - 语义搜索（简化版）
+     */
+    SemanticSearch: {
+        name: 'SemanticSearch',
+        description: '通过语义理解搜索代码库',
+        isReadOnly: true,
+        
+        async call({ query, target_directories = [], num_results = 15 }, context) {
+            const startTime = Date.now();
+            const searchDir = target_directories.length > 0 
+                ? path.join(workingDirectory, target_directories[0])
+                : workingDirectory;
+            
+            console.log(`[SemanticSearch] Query: "${query}" in ${searchDir}`);
+            
+            // 简化实现：使用关键词搜索模拟语义搜索
+            // 真正的语义搜索需要嵌入模型
+            const keywords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+            const results = [];
+            const MAX_RESULTS = num_results;
+            
+            function searchFile(filePath) {
+                if (results.length >= MAX_RESULTS) return;
+                
+                try {
+                    const content = fs.readFileSync(filePath, 'utf8');
+                    const lines = content.split('\n');
+                    const relativePath = path.relative(workingDirectory, filePath);
+                    
+                    // 计算匹配分数
+                    let score = 0;
+                    const matchedLines = [];
+                    
+                    lines.forEach((line, idx) => {
+                        const lowerLine = line.toLowerCase();
+                        let lineScore = 0;
+                        for (const keyword of keywords) {
+                            if (lowerLine.includes(keyword)) {
+                                lineScore += 1;
+                            }
+                        }
+                        if (lineScore > 0) {
+                            score += lineScore;
+                            if (matchedLines.length < 5) {
+                                matchedLines.push({
+                                    line: idx + 1,
+                                    content: line.substring(0, 200),
+                                });
+                            }
+                        }
+                    });
+                    
+                    if (score > 0) {
+                        results.push({
+                            file: relativePath,
+                            score,
+                            matchedLines,
+                        });
+                    }
+                } catch (e) {
+                    // 忽略无法读取的文件
+                }
+            }
+            
+            function walkDir(dir) {
+                if (results.length >= MAX_RESULTS * 2) return;
+                
+                try {
+                    const entries = fs.readdirSync(dir, { withFileTypes: true });
+                    for (const entry of entries) {
+                        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+                        
+                        const fullPath = path.join(dir, entry.name);
+                        if (entry.isDirectory()) {
+                            walkDir(fullPath);
+                        } else {
+                            const ext = path.extname(entry.name).toLowerCase();
+                            if (['.js', '.ts', '.tsx', '.jsx', '.py', '.java', '.go', '.rs', '.c', '.cpp', '.h', '.md', '.json'].includes(ext)) {
+                                searchFile(fullPath);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // 忽略权限错误
+                }
+            }
+            
+            walkDir(searchDir);
+            
+            // 按分数排序
+            results.sort((a, b) => b.score - a.score);
+            const topResults = results.slice(0, MAX_RESULTS);
+            
+            return {
+                query,
+                results: topResults,
+                count: topResults.length,
+                totalMatches: results.length,
+                durationMs: Date.now() - startTime,
+                note: '简化版语义搜索，使用关键词匹配',
+            };
+        }
+    },
+    
+    /**
+     * ReadLints 工具 - 读取 Linter 错误
+     */
+    ReadLints: {
+        name: 'ReadLints',
+        description: '读取文件的 linter 错误和警告',
+        isReadOnly: true,
+        
+        async call({ paths = [] }, context) {
+            const results = [];
+            
+            // 如果没有指定路径，使用当前工作目录
+            const targetPaths = paths.length > 0 ? paths : [workingDirectory];
+            
+            for (const targetPath of targetPaths) {
+                const fullPath = path.isAbsolute(targetPath) 
+                    ? targetPath 
+                    : path.join(workingDirectory, targetPath);
+                
+                if (!fs.existsSync(fullPath)) {
+                    results.push({
+                        path: targetPath,
+                        error: '路径不存在',
+                        diagnostics: [],
+                    });
+                    continue;
+                }
+                
+                // 简化实现：尝试运行 ESLint
+                const stats = fs.statSync(fullPath);
+                const isDir = stats.isDirectory();
+                
+                try {
+                    const eslintCmd = process.platform === 'win32' 
+                        ? `npx eslint "${fullPath}" --format json 2>nul`
+                        : `npx eslint "${fullPath}" --format json 2>/dev/null`;
+                    
+                    const { stdout } = await new Promise((resolve) => {
+                        exec(eslintCmd, { 
+                            cwd: workingDirectory, 
+                            timeout: 30000,
+                            maxBuffer: 5 * 1024 * 1024,
+                        }, (err, stdout, stderr) => {
+                            resolve({ stdout: stdout || '[]', stderr });
+                        });
+                    });
+                    
+                    let eslintResults = [];
+                    try {
+                        eslintResults = JSON.parse(stdout);
+                    } catch (e) {
+                        // 解析失败
+                    }
+                    
+                    for (const file of eslintResults) {
+                        if (file.messages && file.messages.length > 0) {
+                            results.push({
+                                path: path.relative(workingDirectory, file.filePath),
+                                diagnostics: file.messages.map(m => ({
+                                    line: m.line,
+                                    column: m.column,
+                                    severity: m.severity === 2 ? 'error' : 'warning',
+                                    message: m.message,
+                                    rule: m.ruleId,
+                                })),
+                            });
+                        }
+                    }
+                } catch (e) {
+                    results.push({
+                        path: targetPath,
+                        note: 'ESLint 不可用或执行失败',
+                        diagnostics: [],
+                    });
+                }
+            }
+            
+            return {
+                results,
+                totalFiles: results.length,
+                totalDiagnostics: results.reduce((sum, r) => sum + (r.diagnostics?.length || 0), 0),
+            };
+        }
+    },
+    
+    /**
+     * PowerShell 工具 - Windows PowerShell 命令执行
+     * 参考 Claude Code CLI 的 PowerShellTool
+     */
+    PowerShell: {
+        name: 'PowerShell',
+        description: '执行 Windows PowerShell 命令（支持 cmdlet、管道、脚本）',
+        isReadOnly: false,
+        
+        // PowerShell 搜索命令（grep 等价物）
+        SEARCH_COMMANDS: new Set(['select-string', 'get-childitem', 'findstr', 'where.exe', 'find']),
+        // PowerShell 读取命令
+        READ_COMMANDS: new Set(['get-content', 'get-item', 'test-path', 'resolve-path', 'get-process', 'get-service', 'get-location', 'get-filehash', 'get-acl', 'format-hex', 'type', 'cat']),
+        // 语义中性命令
+        NEUTRAL_COMMANDS: new Set(['write-output', 'write-host', 'echo']),
+        
+        // 检查是否是只读命令
+        isReadOnlyCommand(command) {
+            const firstCmd = command.trim().split(/[\s;|]/)[0]?.toLowerCase() || '';
+            return this.SEARCH_COMMANDS.has(firstCmd) || this.READ_COMMANDS.has(firstCmd);
+        },
+        
+        // 解析 PowerShell 别名到规范命令
+        resolveAlias(cmd) {
+            const aliases = {
+                'ls': 'get-childitem', 'dir': 'get-childitem', 'gci': 'get-childitem',
+                'cat': 'get-content', 'type': 'get-content', 'gc': 'get-content',
+                'cd': 'set-location', 'pwd': 'get-location', 'gl': 'get-location',
+                'cp': 'copy-item', 'copy': 'copy-item',
+                'mv': 'move-item', 'move': 'move-item',
+                'rm': 'remove-item', 'del': 'remove-item', 'rd': 'remove-item',
+                'mkdir': 'new-item', 'md': 'new-item',
+                'cls': 'clear-host', 'clear': 'clear-host',
+                'ps': 'get-process', 'gps': 'get-process',
+                'kill': 'stop-process', 'spps': 'stop-process',
+                'curl': 'invoke-webrequest', 'wget': 'invoke-webrequest', 'iwr': 'invoke-webrequest',
+                'sls': 'select-string',
+                'ft': 'format-table', 'fl': 'format-list',
+                'where': 'where-object', '?': 'where-object',
+                'foreach': 'foreach-object', '%': 'foreach-object',
+                'select': 'select-object',
+                'sort': 'sort-object',
+                'measure': 'measure-object',
+            };
+            return aliases[cmd.toLowerCase()] || cmd.toLowerCase();
+        },
+        
+        async call({ command, timeout = 60000, description, working_directory }, context) {
+            const startTime = Date.now();
+            const cwd = working_directory || workingDirectory;
+            
+            console.log(`[PowerShell] Executing: ${command}`);
+            console.log(`[PowerShell] Working directory: ${cwd}`);
+            
+            // 检测危险的 sleep 模式
+            const sleepMatch = /^(?:start-sleep|sleep)(?:\s+-s(?:econds)?)?\s+(\d+)/i.exec(command.trim());
+            if (sleepMatch) {
+                const secs = parseInt(sleepMatch[1], 10);
+                if (secs >= 2) {
+                    console.log(`[PowerShell] Warning: Blocking sleep ${secs}s detected`);
+                }
+            }
+            
+            return new Promise((resolve) => {
+                // 使用 PowerShell 执行命令
+                const psCommand = `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "${command.replace(/"/g, '\\"')}"`;
+                
+                exec(psCommand, {
+                    cwd,
+                    timeout,
+                    encoding: 'utf8',
+                    maxBuffer: 10 * 1024 * 1024,
+                    env: {
+                        ...process.env,
+                        PSModulePath: process.env.PSModulePath || '',
+                    },
+                }, (err, stdout, stderr) => {
+                    const duration = Date.now() - startTime;
+                    
+                    // 解释退出码
+                    let returnCodeInterpretation;
+                    if (err && err.code) {
+                        switch (err.code) {
+                            case 1: returnCodeInterpretation = 'PowerShell 命令执行失败或返回错误'; break;
+                            case 2: returnCodeInterpretation = '命令语法错误或找不到 cmdlet'; break;
+                            default: returnCodeInterpretation = `退出码 ${err.code}`;
+                        }
+                    }
+                    
+                    resolve({
+                        stdout: stdout || '',
+                        stderr: stderr || '',
+                        exitCode: err ? (err.code || 1) : 0,
+                        interrupted: err?.killed || false,
+                        duration,
+                        returnCodeInterpretation,
+                        shell: 'powershell',
+                    });
+                });
+            });
+        }
+    },
+    
+    /**
+     * Compact 工具 - 对话压缩
+     */
+    Compact: {
+        name: 'Compact',
+        description: '压缩对话历史，保留关键上下文',
+        isReadOnly: true,
+        
+        async call({ messages, max_tokens = 4000 }, context) {
+            if (!messages || !Array.isArray(messages)) {
+                return { success: false, error: '未提供消息历史' };
+            }
+            
+            const startTime = Date.now();
+            const originalCount = messages.length;
+            const originalTokens = ConversationCompact.estimateTokens(messages);
+            
+            // 执行压缩
+            const compacted = ConversationCompact.compact(messages, max_tokens);
+            const compactedTokens = ConversationCompact.estimateTokens(compacted.messages);
+            
+            return {
+                success: true,
+                originalMessageCount: originalCount,
+                compactedMessageCount: compacted.messages.length,
+                originalTokenEstimate: originalTokens,
+                compactedTokenEstimate: compactedTokens,
+                compressionRatio: (1 - compactedTokens / originalTokens).toFixed(2),
+                summary: compacted.summary,
+                durationMs: Date.now() - startTime,
+            };
+        }
+    },
+    
+    /**
+     * FileHistory 工具 - 文件历史/撤销
+     */
+    FileHistory: {
+        name: 'FileHistory',
+        description: '管理文件编辑历史，支持撤销和恢复',
+        isReadOnly: false,
+        
+        async call({ action, file_path, snapshot_id }, context) {
+            switch (action) {
+                case 'list': {
+                    const history = FileHistoryManager.getHistory(file_path);
+                    return {
+                        success: true,
+                        file: file_path,
+                        snapshots: history.map(s => ({
+                            id: s.id,
+                            timestamp: s.timestamp,
+                            size: s.size,
+                            hash: s.hash?.substring(0, 8),
+                        })),
+                        count: history.length,
+                    };
+                }
+                
+                case 'restore': {
+                    if (!snapshot_id) {
+                        return { success: false, error: '需要提供 snapshot_id' };
+                    }
+                    const restored = await FileHistoryManager.restore(file_path, snapshot_id);
+                    if (restored) {
+                        return {
+                            success: true,
+                            file: file_path,
+                            restoredTo: snapshot_id,
+                            message: `文件已恢复到快照 ${snapshot_id}`,
+                        };
+                    }
+                    return { success: false, error: '恢复失败，快照不存在' };
+                }
+                
+                case 'diff': {
+                    const diff = await FileHistoryManager.diff(file_path, snapshot_id);
+                    return {
+                        success: true,
+                        file: file_path,
+                        diff,
+                    };
+                }
+                
+                case 'clear': {
+                    FileHistoryManager.clearHistory(file_path);
+                    return {
+                        success: true,
+                        file: file_path,
+                        message: '历史记录已清除',
+                    };
+                }
+                
+                default:
+                    return { success: false, error: `未知操作: ${action}` };
+            }
+        }
+    },
+    
+    /**
+     * TokenCount 工具 - Token 计数
+     */
+    TokenCount: {
+        name: 'TokenCount',
+        description: '估算文本或消息的 Token 数量',
+        isReadOnly: true,
+        
+        async call({ text, messages, model = 'gpt-4' }, context) {
+            let totalTokens = 0;
+            const details = [];
+            
+            if (text) {
+                const tokens = TokenCounter.count(text);
+                totalTokens += tokens;
+                details.push({ type: 'text', tokens, length: text.length });
+            }
+            
+            if (messages && Array.isArray(messages)) {
+                for (const msg of messages) {
+                    const content = typeof msg.content === 'string' 
+                        ? msg.content 
+                        : JSON.stringify(msg.content);
+                    const tokens = TokenCounter.count(content);
+                    totalTokens += tokens;
+                    details.push({
+                        role: msg.role,
+                        tokens,
+                        length: content.length,
+                    });
+                }
+            }
+            
+            return {
+                totalTokens,
+                details,
+                model,
+                note: '基于字符估算，实际 token 数可能有差异',
+            };
+        }
+    },
 };
+
+// ==================== 对话压缩系统 ====================
+const ConversationCompact = {
+    // Token 估算（简化版，约 4 字符 = 1 token）
+    estimateTokens(messages) {
+        if (!messages) return 0;
+        let total = 0;
+        for (const msg of messages) {
+            const content = typeof msg.content === 'string' 
+                ? msg.content 
+                : JSON.stringify(msg.content || '');
+            total += Math.ceil(content.length / 4);
+        }
+        return total;
+    },
+    
+    // 压缩消息
+    compact(messages, maxTokens = 4000) {
+        if (!messages || messages.length === 0) {
+            return { messages: [], summary: null };
+        }
+        
+        const currentTokens = this.estimateTokens(messages);
+        if (currentTokens <= maxTokens) {
+            return { messages, summary: null };
+        }
+        
+        // 保留最近的消息
+        const compacted = [];
+        let tokens = 0;
+        
+        // 从后向前保留消息
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const msg = messages[i];
+            const msgTokens = this.estimateTokens([msg]);
+            
+            if (tokens + msgTokens > maxTokens * 0.8) {
+                break;
+            }
+            
+            compacted.unshift(msg);
+            tokens += msgTokens;
+        }
+        
+        // 生成摘要
+        const removedCount = messages.length - compacted.length;
+        const summary = removedCount > 0 
+            ? `[对话已压缩: 移除了 ${removedCount} 条早期消息，保留最近 ${compacted.length} 条]`
+            : null;
+        
+        // 如果有摘要，添加到开头
+        if (summary) {
+            compacted.unshift({
+                role: 'system',
+                content: summary,
+            });
+        }
+        
+        return { messages: compacted, summary };
+    },
+    
+    // 自动压缩检查
+    shouldCompact(messages, threshold = 8000) {
+        return this.estimateTokens(messages) > threshold;
+    },
+};
+
+// ==================== 文件历史管理器 ====================
+const FileHistoryManager = {
+    _history: new Map(), // file -> snapshots[]
+    _maxSnapshots: 50,
+    _backupDir: path.join(os.tmpdir(), 'sparks-file-history'),
+    
+    // 初始化备份目录
+    init() {
+        if (!fs.existsSync(this._backupDir)) {
+            fs.mkdirSync(this._backupDir, { recursive: true });
+        }
+    },
+    
+    // 创建快照
+    async createSnapshot(filePath) {
+        this.init();
+        
+        const fullPath = path.isAbsolute(filePath) ? filePath : path.join(workingDirectory, filePath);
+        
+        if (!fs.existsSync(fullPath)) {
+            return null;
+        }
+        
+        const content = fs.readFileSync(fullPath);
+        const hash = crypto.createHash('md5').update(content).digest('hex');
+        const id = `${Date.now()}-${hash.substring(0, 8)}`;
+        const backupPath = path.join(this._backupDir, `${path.basename(filePath)}.${id}`);
+        
+        fs.copyFileSync(fullPath, backupPath);
+        
+        const snapshot = {
+            id,
+            filePath: fullPath,
+            backupPath,
+            timestamp: new Date().toISOString(),
+            size: content.length,
+            hash,
+        };
+        
+        // 添加到历史
+        if (!this._history.has(filePath)) {
+            this._history.set(filePath, []);
+        }
+        const history = this._history.get(filePath);
+        history.push(snapshot);
+        
+        // 限制历史数量
+        while (history.length > this._maxSnapshots) {
+            const old = history.shift();
+            if (old && fs.existsSync(old.backupPath)) {
+                fs.unlinkSync(old.backupPath);
+            }
+        }
+        
+        console.log(`[FileHistory] Snapshot created: ${filePath} -> ${id}`);
+        return snapshot;
+    },
+    
+    // 获取历史
+    getHistory(filePath) {
+        return this._history.get(filePath) || [];
+    },
+    
+    // 恢复到快照
+    async restore(filePath, snapshotId) {
+        const history = this.getHistory(filePath);
+        const snapshot = history.find(s => s.id === snapshotId);
+        
+        if (!snapshot || !fs.existsSync(snapshot.backupPath)) {
+            return false;
+        }
+        
+        // 先创建当前状态的快照
+        await this.createSnapshot(filePath);
+        
+        // 恢复
+        fs.copyFileSync(snapshot.backupPath, snapshot.filePath);
+        console.log(`[FileHistory] Restored: ${filePath} <- ${snapshotId}`);
+        
+        return true;
+    },
+    
+    // 获取 diff
+    async diff(filePath, snapshotId) {
+        const fullPath = path.isAbsolute(filePath) ? filePath : path.join(workingDirectory, filePath);
+        
+        if (!fs.existsSync(fullPath)) {
+            return { error: '文件不存在' };
+        }
+        
+        const history = this.getHistory(filePath);
+        const snapshot = snapshotId 
+            ? history.find(s => s.id === snapshotId)
+            : history[history.length - 1];
+        
+        if (!snapshot || !fs.existsSync(snapshot.backupPath)) {
+            return { error: '快照不存在' };
+        }
+        
+        const current = fs.readFileSync(fullPath, 'utf8');
+        const old = fs.readFileSync(snapshot.backupPath, 'utf8');
+        
+        // 简单的行级 diff
+        const currentLines = current.split('\n');
+        const oldLines = old.split('\n');
+        
+        const additions = currentLines.filter(l => !oldLines.includes(l)).length;
+        const deletions = oldLines.filter(l => !currentLines.includes(l)).length;
+        
+        return {
+            snapshotId: snapshot.id,
+            timestamp: snapshot.timestamp,
+            additions,
+            deletions,
+            currentLines: currentLines.length,
+            oldLines: oldLines.length,
+        };
+    },
+    
+    // 清除历史
+    clearHistory(filePath) {
+        const history = this.getHistory(filePath);
+        for (const snapshot of history) {
+            if (fs.existsSync(snapshot.backupPath)) {
+                fs.unlinkSync(snapshot.backupPath);
+            }
+        }
+        this._history.delete(filePath);
+    },
+};
+
+// ==================== Token 计数器 ====================
+const TokenCounter = {
+    // 简单的 token 估算（约 4 字符 = 1 token，中文约 2 字符 = 1 token）
+    count(text) {
+        if (!text) return 0;
+        
+        // 分离中文和英文
+        const chinese = text.match(/[\u4e00-\u9fff]/g) || [];
+        const other = text.replace(/[\u4e00-\u9fff]/g, '');
+        
+        // 中文：约 1.5 字符/token，英文：约 4 字符/token
+        const chineseTokens = Math.ceil(chinese.length / 1.5);
+        const otherTokens = Math.ceil(other.length / 4);
+        
+        return chineseTokens + otherTokens;
+    },
+    
+    // 估算消息列表的 token
+    countMessages(messages) {
+        let total = 0;
+        for (const msg of messages) {
+            // 每条消息有额外开销
+            total += 4;
+            if (msg.role) total += 1;
+            if (msg.content) {
+                total += this.count(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
+            }
+        }
+        return total;
+    },
+    
+    // 获取使用统计
+    getUsageStats() {
+        return { ...tokenUsageStats };
+    },
+};
+
+// Token 使用统计
+let tokenUsageStats = {
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCost: 0,
+    requestCount: 0,
+};
+
+// 更新 token 使用
+function updateTokenUsage(inputTokens, outputTokens, model = 'gpt-4') {
+    tokenUsageStats.totalInputTokens += inputTokens;
+    tokenUsageStats.totalOutputTokens += outputTokens;
+    tokenUsageStats.requestCount++;
+    
+    // 简单的成本估算 (USD)
+    const inputCost = inputTokens * 0.00003; // $0.03/1K
+    const outputCost = outputTokens * 0.00006; // $0.06/1K
+    tokenUsageStats.totalCost += inputCost + outputCost;
+    
+    // 发送到前端
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('token-usage-updated', tokenUsageStats);
+    }
+}
+
+// ==================== 钩子系统 ====================
+const HooksManager = {
+    _hooks: {
+        preToolUse: [],
+        postToolUse: [],
+        preCompact: [],
+        postCompact: [],
+        onError: [],
+    },
+    
+    // 注册钩子
+    register(event, callback) {
+        if (this._hooks[event]) {
+            this._hooks[event].push(callback);
+            console.log(`[Hooks] Registered ${event} hook`);
+            return true;
+        }
+        return false;
+    },
+    
+    // 移除钩子
+    unregister(event, callback) {
+        if (this._hooks[event]) {
+            const idx = this._hooks[event].indexOf(callback);
+            if (idx > -1) {
+                this._hooks[event].splice(idx, 1);
+                return true;
+            }
+        }
+        return false;
+    },
+    
+    // 执行 PreToolUse 钩子
+    async executePreToolUse(toolName, input, context) {
+        const results = [];
+        for (const hook of this._hooks.preToolUse) {
+            try {
+                const result = await hook({ toolName, input, context });
+                results.push(result);
+                
+                // 如果钩子返回 { abort: true }，停止执行
+                if (result && result.abort) {
+                    return { abort: true, reason: result.reason || 'Hook aborted', results };
+                }
+                
+                // 如果钩子返回 { modifiedInput }，使用修改后的输入
+                if (result && result.modifiedInput) {
+                    input = result.modifiedInput;
+                }
+            } catch (e) {
+                console.error(`[Hooks] PreToolUse hook error:`, e.message);
+            }
+        }
+        return { abort: false, input, results };
+    },
+    
+    // 执行 PostToolUse 钩子
+    async executePostToolUse(toolName, input, result, context) {
+        const hookResults = [];
+        for (const hook of this._hooks.postToolUse) {
+            try {
+                const hookResult = await hook({ toolName, input, result, context });
+                hookResults.push(hookResult);
+                
+                // 如果钩子返回 { modifiedResult }，使用修改后的结果
+                if (hookResult && hookResult.modifiedResult) {
+                    result = hookResult.modifiedResult;
+                }
+            } catch (e) {
+                console.error(`[Hooks] PostToolUse hook error:`, e.message);
+            }
+        }
+        return { result, hookResults };
+    },
+    
+    // 执行 PreCompact 钩子
+    async executePreCompact(messages) {
+        for (const hook of this._hooks.preCompact) {
+            try {
+                await hook({ messages });
+            } catch (e) {
+                console.error(`[Hooks] PreCompact hook error:`, e.message);
+            }
+        }
+    },
+    
+    // 执行 PostCompact 钩子
+    async executePostCompact(originalMessages, compactedMessages, summary) {
+        for (const hook of this._hooks.postCompact) {
+            try {
+                await hook({ originalMessages, compactedMessages, summary });
+            } catch (e) {
+                console.error(`[Hooks] PostCompact hook error:`, e.message);
+            }
+        }
+    },
+    
+    // 执行错误钩子
+    async executeOnError(error, context) {
+        for (const hook of this._hooks.onError) {
+            try {
+                await hook({ error, context });
+            } catch (e) {
+                console.error(`[Hooks] OnError hook error:`, e.message);
+            }
+        }
+    },
+};
+
+// 示例：注册默认的文件历史钩子
+HooksManager.register('preToolUse', async ({ toolName, input }) => {
+    // 在 Write/Edit 之前自动创建快照
+    if (['Write', 'Edit'].includes(toolName) && input.file_path) {
+        await FileHistoryManager.createSnapshot(input.file_path);
+    }
+    return { abort: false };
+});
 
 /**
  * 工具名称映射（cursor2api 返回的名称 -> 我们的工具名称）
@@ -2078,6 +3266,31 @@ const TOOL_NAME_MAP = {
     'web_search': 'WebSearch',
     'web_fetch': 'WebFetch',
     'fetch': 'WebFetch',
+    'delete_file': 'Delete',
+    'remove_file': 'Delete',
+    'notebook_edit': 'NotebookEdit',
+    'edit_notebook': 'NotebookEdit',
+    'todo_write': 'TodoWrite',
+    'create_task': 'Task',
+    'ask_question': 'AskQuestion',
+    'semantic_search': 'SemanticSearch',
+    'code_search': 'SemanticSearch',
+    'read_lints': 'ReadLints',
+    'get_diagnostics': 'ReadLints',
+    // PowerShell
+    'powershell': 'PowerShell',
+    'pwsh': 'PowerShell',
+    'ps': 'PowerShell',
+    // 新增系统工具
+    'compact': 'Compact',
+    'compress': 'Compact',
+    'file_history': 'FileHistory',
+    'undo': 'FileHistory',
+    'token_count': 'TokenCount',
+    'count_tokens': 'TokenCount',
+    // Claude Code CLI 风格名称 (StrReplace -> Edit)
+    'str_replace': 'Edit',
+    'StrReplace': 'Edit',
     // 大小写变体
     'Read': 'Read',
     'Bash': 'Bash',
@@ -2089,6 +3302,18 @@ const TOOL_NAME_MAP = {
     'WebSearch': 'WebSearch',
     'WebFetch': 'WebFetch',
     'Shell': 'Shell',
+    'Delete': 'Delete',
+    'NotebookEdit': 'NotebookEdit',
+    'EditNotebook': 'NotebookEdit',
+    'TodoWrite': 'TodoWrite',
+    'Task': 'Task',
+    'AskQuestion': 'AskQuestion',
+    'SemanticSearch': 'SemanticSearch',
+    'ReadLints': 'ReadLints',
+    'PowerShell': 'PowerShell',
+    'Compact': 'Compact',
+    'FileHistory': 'FileHistory',
+    'TokenCount': 'TokenCount',
 };
 
 /**
@@ -2242,6 +3467,19 @@ function getToolIcon(toolName) {
         'WebSearch': '🔍',
         'Delete': '🗑️',
         'Remote': '📡',
+        // Claude Code 新增工具图标
+        'NotebookEdit': '📓',
+        'EditNotebook': '📓',
+        'TodoWrite': '✅',
+        'Task': '🤖',
+        'AskQuestion': '❓',
+        'SemanticSearch': '🧠',
+        'ReadLints': '⚠️',
+        // 新增系统工具图标
+        'PowerShell': '🔷',
+        'Compact': '📦',
+        'FileHistory': '⏪',
+        'TokenCount': '🔢',
     };
     return icons[toolName] || '🔧';
 }
@@ -2257,7 +3495,11 @@ function getToolInputSummary(toolName, input) {
             return `\`${input.file_path}\` (${input.content?.length || 0} chars)`;
         case 'Edit':
             return `\`${input.file_path}\``;
+        case 'Delete':
+            return `\`${input.file_path}\``;
         case 'Bash':
+            return `\`${input.command?.substring(0, 50)}${input.command?.length > 50 ? '...' : ''}\``;
+        case 'Shell':
             return `\`${input.command?.substring(0, 50)}${input.command?.length > 50 ? '...' : ''}\``;
         case 'Glob':
             return `\`${input.pattern}\``;
@@ -2269,6 +3511,30 @@ function getToolInputSummary(toolName, input) {
             return `"${input.query}"`;
         case 'Remote':
             return `${input.action}${input.session_id ? ` (${input.session_id})` : ''}`;
+        // Claude Code 新增工具
+        case 'NotebookEdit':
+        case 'EditNotebook':
+            return `\`${input.target_notebook}\` cell ${input.cell_idx}`;
+        case 'TodoWrite':
+            return `${input.todos?.length || 0} 个任务`;
+        case 'Task':
+            return `${input.description?.substring(0, 30) || ''}`;
+        case 'AskQuestion':
+            return `${input.questions?.length || 0} 个问题`;
+        case 'SemanticSearch':
+            return `"${input.query?.substring(0, 30) || ''}"`;
+        case 'ReadLints':
+            return `${input.paths?.length || 0} 个路径`;
+        case 'LS':
+            return `\`${input.path || '.'}\``;
+        case 'PowerShell':
+            return `\`${input.command?.substring(0, 50)}${input.command?.length > 50 ? '...' : ''}\``;
+        case 'Compact':
+            return `${input.messages?.length || 0} 条消息`;
+        case 'FileHistory':
+            return `${input.action} ${input.file_path || ''}`;
+        case 'TokenCount':
+            return input.text ? `${input.text.length} 字符` : `${input.messages?.length || 0} 条消息`;
         default:
             return '';
     }
@@ -6204,4 +7470,85 @@ ipcMain.handle('set-agentic-config', (event, config) => {
 // 获取 agentic loop 配置
 ipcMain.handle('get-agentic-config', () => {
     return { ...AGENTIC_CONFIG };
+});
+
+// ==================== 新增功能 IPC 处理器 ====================
+
+// Token 使用统计
+ipcMain.handle('get-token-usage', () => {
+    return TokenCounter.getUsageStats();
+});
+
+// 重置 Token 统计
+ipcMain.handle('reset-token-usage', () => {
+    tokenUsageStats = {
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalCost: 0,
+        requestCount: 0,
+    };
+    return { success: true };
+});
+
+// 估算文本的 Token 数
+ipcMain.handle('estimate-tokens', (event, text) => {
+    return { tokens: TokenCounter.count(text) };
+});
+
+// 对话压缩
+ipcMain.handle('compact-messages', async (event, { messages, maxTokens }) => {
+    const result = ConversationCompact.compact(messages, maxTokens);
+    return result;
+});
+
+// 检查是否需要压缩
+ipcMain.handle('should-compact', (event, { messages, threshold }) => {
+    return { shouldCompact: ConversationCompact.shouldCompact(messages, threshold) };
+});
+
+// 文件历史 - 创建快照
+ipcMain.handle('file-history-snapshot', async (event, filePath) => {
+    const snapshot = await FileHistoryManager.createSnapshot(filePath);
+    return snapshot;
+});
+
+// 文件历史 - 获取历史列表
+ipcMain.handle('file-history-list', (event, filePath) => {
+    return FileHistoryManager.getHistory(filePath);
+});
+
+// 文件历史 - 恢复
+ipcMain.handle('file-history-restore', async (event, { filePath, snapshotId }) => {
+    const success = await FileHistoryManager.restore(filePath, snapshotId);
+    return { success };
+});
+
+// 文件历史 - 获取 diff
+ipcMain.handle('file-history-diff', async (event, { filePath, snapshotId }) => {
+    return await FileHistoryManager.diff(filePath, snapshotId);
+});
+
+// 注册钩子
+ipcMain.handle('register-hook', (event, { hookType, hookId }) => {
+    // 钩子回调会通过 IPC 调用前端
+    const callback = async (data) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            return await mainWindow.webContents.invoke(`hook-callback-${hookId}`, data);
+        }
+        return null;
+    };
+    
+    const success = HooksManager.register(hookType, callback);
+    return { success, hookId };
+});
+
+// 获取已注册的钩子
+ipcMain.handle('get-hooks', () => {
+    return {
+        preToolUse: HooksManager._hooks.preToolUse.length,
+        postToolUse: HooksManager._hooks.postToolUse.length,
+        preCompact: HooksManager._hooks.preCompact.length,
+        postCompact: HooksManager._hooks.postCompact.length,
+        onError: HooksManager._hooks.onError.length,
+    };
 });
