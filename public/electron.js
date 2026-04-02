@@ -553,6 +553,22 @@ let providersConfig = {
         proxyUrl: '',
         selectedModel: 'qwen-max',
     },
+    mimo: {
+        apiKey: '',
+        baseUrl: 'https://api.xiaomimimo.com/v1',
+        enabled: false,
+        useProxy: false,
+        proxyUrl: '',
+        selectedModel: 'mimo-v2-pro',
+    },
+    openrouter: {
+        apiKey: '',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        enabled: false,
+        useProxy: true,
+        proxyUrl: 'http://127.0.0.1:7890',
+        selectedModel: 'anthropic/claude-sonnet-4',
+    },
     custom: {
         apiKey: '',
         baseUrl: '',
@@ -572,6 +588,8 @@ let providerClients = {
     google: null,      // Google SDK (用 fetch)
     deepseek: null,    // OpenAI SDK (兼容)
     qwen: null,        // OpenAI SDK (兼容)
+    mimo: null,        // OpenAI SDK (兼容) - 小米 MiMo
+    openrouter: null,  // OpenAI SDK (兼容) - OpenRouter 300+ 模型
     custom: null,      // OpenAI SDK (兼容)
 };
 
@@ -634,6 +652,16 @@ function initAllProviderClients() {
     // 千问 (OpenAI 兼容)
     if (providersConfig.qwen.apiKey) {
         initProviderClient('qwen');
+    }
+    
+    // 小米 MiMo (OpenAI 兼容)
+    if (providersConfig.mimo.apiKey) {
+        initProviderClient('mimo');
+    }
+    
+    // OpenRouter (OpenAI 兼容，300+ 模型)
+    if (providersConfig.openrouter.apiKey) {
+        initProviderClient('openrouter');
     }
     
     // 自定义 (OpenAI 兼容)
@@ -4757,6 +4785,8 @@ ipcMain.handle('chat-with-provider', async (event, { provider, config, userText,
             case 'openai':
             case 'deepseek':
             case 'qwen':
+            case 'mimo':
+            case 'openrouter':
             case 'custom':
                 // OpenAI 兼容的厂商
                 if (!providerClients[provider]) {

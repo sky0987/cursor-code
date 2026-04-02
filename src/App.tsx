@@ -1,7 +1,34 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
-const { ipcRenderer } = window.require('electron');
+// 安全获取 electron ipcRenderer，在浏览器环境中返回 mock
+const getIpcRenderer = () => {
+  try {
+    if (typeof window !== 'undefined' && window.require) {
+      return window.require('electron').ipcRenderer;
+    }
+  } catch (e) {
+    console.warn('Not running in Electron environment');
+  }
+  // 返回一个 mock 对象，避免在浏览器中报错
+  return {
+    invoke: async (channel: string, ...args: unknown[]) => {
+      console.log(`[Mock IPC] invoke: ${channel}`, args);
+      return null;
+    },
+    on: (channel: string, listener: (...args: unknown[]) => void) => {
+      console.log(`[Mock IPC] on: ${channel}`);
+      return { removeListener: () => {} };
+    },
+    removeListener: () => {},
+    removeAllListeners: () => {},
+    send: (channel: string, ...args: unknown[]) => {
+      console.log(`[Mock IPC] send: ${channel}`, args);
+    },
+  };
+};
+
+const ipcRenderer = getIpcRenderer();
 
 interface ToolResult {
   tool: string;
@@ -48,7 +75,7 @@ const MODELS = [
 // ==================== API 厂商配置 ====================
 
 // 支持的 API 厂商
-type ApiProvider = 'cursor2api' | 'openai' | 'anthropic' | 'google' | 'deepseek' | 'qwen' | 'custom';
+type ApiProvider = 'cursor2api' | 'openai' | 'anthropic' | 'google' | 'deepseek' | 'qwen' | 'mimo' | 'openrouter' | 'custom';
 
 // 厂商信息
 const API_PROVIDERS: Record<ApiProvider, {
@@ -267,6 +294,74 @@ const API_PROVIDERS: Record<ApiProvider, {
       { id: 'qwen-coder-turbo', name: 'Qwen Coder Turbo', group: '代码系列' },
       // 多模态
       { id: 'qwen-omni', name: 'Qwen Omni (全模态)', group: '多模态' },
+    ],
+  },
+  mimo: {
+    name: '小米 MiMo',
+    icon: '🟠',
+    needsProxy: false,
+    defaultBaseUrl: 'https://api.xiaomimimo.com/v1',
+    models: [
+      // MiMo-V2 系列
+      { id: 'mimo-v2-pro', name: 'MiMo-V2 Pro (1M上下文)', group: 'MiMo-V2 系列' },
+      { id: 'mimo-v2-omni', name: 'MiMo-V2 Omni (多模态)', group: 'MiMo-V2 系列' },
+      { id: 'mimo-v2-flash', name: 'MiMo-V2 Flash (快速)', group: 'MiMo-V2 系列' },
+      // 语音系列
+      { id: 'mimo-v2-tts', name: 'MiMo-V2 TTS (语音合成)', group: '语音系列' },
+    ],
+  },
+  openrouter: {
+    name: 'OpenRouter',
+    icon: '🌐',
+    needsProxy: true,
+    defaultBaseUrl: 'https://openrouter.ai/api/v1',
+    models: [
+      // Claude 系列
+      { id: 'anthropic/claude-opus-4', name: 'Claude Opus 4', group: 'Claude' },
+      { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', group: 'Claude' },
+      { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', group: 'Claude' },
+      { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', group: 'Claude' },
+      // GPT 系列
+      { id: 'openai/gpt-4o', name: 'GPT-4o', group: 'OpenAI' },
+      { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', group: 'OpenAI' },
+      { id: 'openai/o1', name: 'O1', group: 'OpenAI' },
+      { id: 'openai/o1-mini', name: 'O1 Mini', group: 'OpenAI' },
+      { id: 'openai/o3-mini', name: 'O3 Mini', group: 'OpenAI' },
+      // Gemini 系列
+      { id: 'google/gemini-2.5-pro-preview', name: 'Gemini 2.5 Pro', group: 'Google' },
+      { id: 'google/gemini-2.5-flash-preview', name: 'Gemini 2.5 Flash', group: 'Google' },
+      { id: 'google/gemini-2.0-flash', name: 'Gemini 2.0 Flash', group: 'Google' },
+      // 小米 MiMo
+      { id: 'xiaomi/mimo-v2-pro', name: 'MiMo-V2 Pro', group: '小米' },
+      // DeepSeek
+      { id: 'deepseek/deepseek-chat', name: 'DeepSeek Chat', group: 'DeepSeek' },
+      { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', group: 'DeepSeek' },
+      // Qwen (通义千问)
+      { id: 'qwen/qwen3.6-plus-preview:free', name: 'Qwen 3.6 Plus Preview (免费)', group: '通义千问' },
+      { id: 'qwen/qwen3.5-flash', name: 'Qwen 3.5 Flash (1M上下文)', group: '通义千问' },
+      { id: 'qwen/qwen3-235b-a22b-instruct-2507', name: 'Qwen3 235B A22B', group: '通义千问' },
+      { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B', group: '通义千问' },
+      { id: 'qwen/qwq-32b', name: 'QWQ 32B (推理)', group: '通义千问' },
+      // Meta Llama
+      { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', group: 'Meta' },
+      { id: 'meta-llama/llama-3.1-405b-instruct', name: 'Llama 3.1 405B', group: 'Meta' },
+      // Mistral
+      { id: 'mistralai/mistral-large', name: 'Mistral Large', group: 'Mistral' },
+      { id: 'mistralai/codestral', name: 'Codestral', group: 'Mistral' },
+      // 免费模型 (2026最新)
+      { id: 'qwen/qwen3.6-plus-preview:free', name: 'Qwen 3.6 Plus Preview (1M上下文)', group: '免费模型' },
+      { id: 'nvidia/nemotron-3-super-120b-a12b:free', name: 'Nemotron 3 Super 120B (262K)', group: '免费模型' },
+      { id: 'minimax/minimax-m2.5:free', name: 'MiniMax M2.5 (197K)', group: '免费模型' },
+      { id: 'stepfun/step-3.5-flash:free', name: 'Step 3.5 Flash (256K)', group: '免费模型' },
+      { id: 'arcee-ai/trinity-large-preview:free', name: 'Trinity Large 400B (131K)', group: '免费模型' },
+      { id: 'arcee-ai/trinity-mini:free', name: 'Trinity Mini 26B (131K)', group: '免费模型' },
+      { id: 'liquid/lfm-2.5-1.2b-thinking:free', name: 'LFM 2.5 Thinking (32K)', group: '免费模型' },
+      { id: 'liquid/lfm-2.5-1.2b-instruct:free', name: 'LFM 2.5 Instruct (32K)', group: '免费模型' },
+      { id: 'nvidia/nemotron-3-nano-30b-a3b:free', name: 'Nemotron 3 Nano 30B (256K)', group: '免费模型' },
+      { id: 'nvidia/nemotron-nano-12b-v2-vl:free', name: 'Nemotron Nano 12B VL (128K)', group: '免费模型' },
+      { id: 'qwen/qwen3-next-80b-a3b-instruct:free', name: 'Qwen3 Next 80B (262K)', group: '免费模型' },
+      { id: 'google/gemma-2-9b-it:free', name: 'Gemma 2 9B', group: '免费模型' },
+      { id: 'meta-llama/llama-3.2-3b-instruct:free', name: 'Llama 3.2 3B', group: '免费模型' },
     ],
   },
   custom: {
