@@ -29,7 +29,7 @@
     "cursor",
     "sparks"
   ],
-  "private": true,
+  "private": false,
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
     "@testing-library/dom": "^10.4.1",
