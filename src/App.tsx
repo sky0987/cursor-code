@@ -336,30 +336,32 @@ const API_PROVIDERS: Record<ApiProvider, {
       // DeepSeek
       { id: 'deepseek/deepseek-chat', name: 'DeepSeek Chat', group: 'DeepSeek' },
       { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', group: 'DeepSeek' },
-      // Qwen (通义千问)
-      { id: 'qwen/qwen3.6-plus-preview:free', name: 'Qwen 3.6 Plus Preview (免费)', group: '通义千问' },
+      // Qwen (通义千问) - 2026年4月最新
+      { id: 'qwen/qwen3.6-plus:free', name: 'Qwen 3.6 Plus (免费/1M上下文)', group: '通义千问' },
+      { id: 'qwen/qwen3-235b-a22b-instruct-2507', name: 'Qwen3 235B A22B (262K上下文)', group: '通义千问' },
       { id: 'qwen/qwen3.5-flash', name: 'Qwen 3.5 Flash (1M上下文)', group: '通义千问' },
-      { id: 'qwen/qwen3-235b-a22b-instruct-2507', name: 'Qwen3 235B A22B', group: '通义千问' },
-      { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B', group: '通义千问' },
       { id: 'qwen/qwq-32b', name: 'QWQ 32B (推理)', group: '通义千问' },
+      { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B', group: '通义千问' },
       // Meta Llama
       { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', group: 'Meta' },
       { id: 'meta-llama/llama-3.1-405b-instruct', name: 'Llama 3.1 405B', group: 'Meta' },
       // Mistral
       { id: 'mistralai/mistral-large', name: 'Mistral Large', group: 'Mistral' },
       { id: 'mistralai/codestral', name: 'Codestral', group: 'Mistral' },
-      // 免费模型 (2026最新)
-      { id: 'qwen/qwen3.6-plus-preview:free', name: 'Qwen 3.6 Plus Preview (1M上下文)', group: '免费模型' },
-      { id: 'nvidia/nemotron-3-super-120b-a12b:free', name: 'Nemotron 3 Super 120B (262K)', group: '免费模型' },
-      { id: 'minimax/minimax-m2.5:free', name: 'MiniMax M2.5 (197K)', group: '免费模型' },
+      // 免费模型 (2026年4月最新)
+      { id: 'qwen/qwen3.6-plus:free', name: 'Qwen 3.6 Plus (1M上下文)', group: '免费模型' },
       { id: 'stepfun/step-3.5-flash:free', name: 'Step 3.5 Flash (256K)', group: '免费模型' },
+      { id: 'nvidia/nemotron-3-super-120b-a12b:free', name: 'Nemotron 3 Super 120B (262K)', group: '免费模型' },
       { id: 'arcee-ai/trinity-large-preview:free', name: 'Trinity Large 400B (131K)', group: '免费模型' },
+      { id: 'z-ai/glm-4.5-air:free', name: 'GLM 4.5 Air (131K)', group: '免费模型' },
+      { id: 'nvidia/nemotron-3-nano-30b-a3b:free', name: 'Nemotron 3 Nano 30B (256K)', group: '免费模型' },
+      { id: 'minimax/minimax-m2.5:free', name: 'MiniMax M2.5 (197K)', group: '免费模型' },
       { id: 'arcee-ai/trinity-mini:free', name: 'Trinity Mini 26B (131K)', group: '免费模型' },
+      { id: 'nvidia/nemotron-nano-12b-v2-vl:free', name: 'Nemotron Nano 12B VL (128K)', group: '免费模型' },
+      { id: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (131K)', group: '免费模型' },
+      { id: 'qwen/qwen3-next-80b-a3b-instruct:free', name: 'Qwen3 Next 80B (262K)', group: '免费模型' },
       { id: 'liquid/lfm-2.5-1.2b-thinking:free', name: 'LFM 2.5 Thinking (32K)', group: '免费模型' },
       { id: 'liquid/lfm-2.5-1.2b-instruct:free', name: 'LFM 2.5 Instruct (32K)', group: '免费模型' },
-      { id: 'nvidia/nemotron-3-nano-30b-a3b:free', name: 'Nemotron 3 Nano 30B (256K)', group: '免费模型' },
-      { id: 'nvidia/nemotron-nano-12b-v2-vl:free', name: 'Nemotron Nano 12B VL (128K)', group: '免费模型' },
-      { id: 'qwen/qwen3-next-80b-a3b-instruct:free', name: 'Qwen3 Next 80B (262K)', group: '免费模型' },
       { id: 'google/gemma-2-9b-it:free', name: 'Gemma 2 9B', group: '免费模型' },
       { id: 'meta-llama/llama-3.2-3b-instruct:free', name: 'Llama 3.2 3B', group: '免费模型' },
     ],
@@ -440,6 +442,7 @@ function App() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [streamText, setStreamText] = useState('');
+  const streamTextRef = useRef('');
   const [abortController, setAbortController] = useState<AbortController | null>(null);
   const [cwd, setCwd] = useState('');
   const [files, setFiles] = useState<FileItem[]>([]);
@@ -758,31 +761,28 @@ function App() {
     
     const handleStream = (_: any, text: string) => {
       if (text) {
-        // 追加文本而不是覆盖，实现真正的流式输出
-        setStreamText(prev => prev + text);
+        setStreamText(prev => {
+          const updated = prev + text;
+          streamTextRef.current = updated;
+          return updated;
+        });
       }
     };
     
     const handleEnd = (_: any, data: { response: string; savedFiles: any[]; toolResults?: ToolResult[] }) => {
       console.log('[App] chat-end received:', data);
       
-      let response = data?.response || streamText || '';
+      // 优先用 streamTextRef（包含工具标记），没有才用 data.response
+      let response = streamTextRef.current || data?.response || '';
       
       if (!response.trim()) {
         response = '抱歉，没有收到有效响应，请重试。';
       }
       
-      // 处理工具调用结果
+      // 处理工具调用结果（仅通知）
       const results = data?.toolResults || [];
       if (results.length > 0) {
         setToolResults(results);
-        results.forEach(r => {
-          if (r.success) {
-            showNotification(`✅ ${r.tool} 执行成功`);
-          } else {
-            showNotification(`❌ ${r.tool}: ${r.error}`);
-          }
-        });
       }
       
       if (data?.savedFiles?.length > 0) {
@@ -796,9 +796,9 @@ function App() {
       setMessages(prev => [...prev, { 
         role: 'assistant', 
         content: response,
-        toolResults: results.length > 0 ? results : undefined,
       }]);
       setStreamText('');
+      streamTextRef.current = '';
       setLoading(false);
       loadFiles();
     };
@@ -866,11 +866,11 @@ function App() {
   const stopRequest = async () => {
     try {
       await ipcRenderer.invoke('chat-stop');
-      if (streamText) {
-        // 保存已有的流式输出
-        setMessages(prev => [...prev, { role: 'assistant', content: streamText + '\n\n*(已停止)*' }]);
+      if (streamTextRef.current) {
+        setMessages(prev => [...prev, { role: 'assistant', content: streamTextRef.current + '\n\n*(已停止)*' }]);
       }
       setStreamText('');
+      streamTextRef.current = '';
       setLoading(false);
       showNotification('⏹️ 已停止');
     } catch (err) {
@@ -1122,22 +1122,72 @@ function App() {
     let blockIndex = 0;
     let html = text;
     
-    // 处理工具执行 - 完整（开始+结束）- 使用更宽松的匹配
+    // 存储工具块数据
+    const toolBlocks: Record<string, any> = {};
+    
+    // 解析工具块 - 新格式 TOOL_BLOCK
+    html = html.replace(/<!--TOOL_BLOCK:(.*?)-->/g, (match, jsonStr) => {
+      try {
+        const data = JSON.parse(jsonStr);
+        toolBlocks[data.id] = data;
+        return `<!--TOOL_PLACEHOLDER:${data.id}-->`;
+      } catch {
+        return '';
+      }
+    });
+    
+    // 解析工具更新 - TOOL_UPDATE
+    html = html.replace(/<!--TOOL_UPDATE:(.*?)-->/g, (match, jsonStr) => {
+      try {
+        const update = JSON.parse(jsonStr);
+        if (toolBlocks[update.id]) {
+          toolBlocks[update.id] = { ...toolBlocks[update.id], ...update };
+        }
+        return '';
+      } catch {
+        return '';
+      }
+    });
+    
+    // 渲染工具块占位符 - 使用原生 <details> 实现折叠
+    html = html.replace(/<!--TOOL_PLACEHOLDER:([^>]+)-->/g, (match, id) => {
+      const data = toolBlocks[id];
+      if (!data) return '';
+      
+      const isRunning = data.status === 'running';
+      const isSuccess = data.status === 'success';
+      const isError = data.status === 'error';
+      const statusClass = isRunning ? 'running' : (isSuccess ? 'success' : 'error');
+      
+      const esc = (str: string) => (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      
+      const inputEsc = esc(data.input || '');
+      const outputEsc = esc(data.output || '');
+      const descEsc = esc(data.desc || data.tool);
+      const cmdPreview = inputEsc.split('\n')[0].slice(0, 50);
+      const statusHtml = isRunning ? '<span class="tb-spin"></span>' : `<span class="tb-st ${statusClass}">${isSuccess ? '✓' : '✕'}</span>`;
+      const outputBlock = data.output ? `<pre class="tb-out ${isError ? 'error' : ''}">${outputEsc}</pre>` : '';
+      
+      return `<details class="tb ${statusClass}"><summary class="tb-sum">${data.icon || '⚡'} <b>${descEsc}</b> <code>${cmdPreview}</code>${statusHtml}</summary><pre class="tb-cmd">$ ${inputEsc}</pre>${outputBlock}</details>`;
+    });
+    
+    // 兼容旧格式 - 完成的工具
     html = html.replace(/<!--TOOL_START:(\w+):([^:]*):(.*)-->\s*<!--TOOL_END:(success|error):(\d+)(?::(.*?))?-->/g, 
-      (match, toolName, icon, summary, status, duration, errorMsg) => {
+      (match, toolName, icon, summary, status) => {
         if (!toolName || toolName === 'undefined') return '';
-        const cleanSummary = (summary || '').replace(/[`\n\r]/g, ' ').trim().slice(0, 35);
-        const statusText = status === 'success' ? '✓' : '✗';
-        return `<span class="tool-card ${status}">${icon || '🔧'}<b>${toolName}</b>${cleanSummary ? `<span class="tool-card-summary">${cleanSummary}</span>` : ''}<span class="tool-card-status ${status}">${statusText}</span><span class="tool-card-duration">${duration}ms</span></span>`;
+        const desc = (summary || '').split('|')[0] || toolName;
+        const details = (summary || '').split('|')[1] || '';
+        return `<details class="tb ${status}"><summary class="tb-sum">${icon || '⚡'} <b>${desc}</b> <code>${details.slice(0, 50)}</code><span class="tb-st ${status}">${status === 'success' ? '✓' : '✕'}</span></summary></details>`;
       }
     );
     
-    // 处理正在执行的工具
+    // 兼容旧格式 - 正在执行的工具
     html = html.replace(/<!--TOOL_START:(\w+):([^:]*):(.*)-->/g, 
       (match, toolName, icon, summary) => {
         if (!toolName || toolName === 'undefined') return '';
-        const cleanSummary = (summary || '').replace(/[`\n\r]/g, ' ').trim().slice(0, 35);
-        return `<span class="tool-card running">${icon || '🔧'}<b>${toolName}</b>${cleanSummary ? `<span class="tool-card-summary">${cleanSummary}</span>` : ''}<span class="tool-card-status running">...</span></span>`;
+        const desc = (summary || '').split('|')[0] || toolName;
+        const details = (summary || '').split('|')[1] || '';
+        return `<details class="tb running"><summary class="tb-sum">${icon || '⚡'} <b>${desc}</b> <code>${details.slice(0, 50)}</code><span class="tb-spin"></span></summary></details>`;
       }
     );
 
@@ -1146,11 +1196,8 @@ function App() {
       (_, toolName) => `<span class="tool-denied">⊘ ${toolName}</span>`
     );
 
-    // 移除孤立的 TOOL_END 标记
-    html = html.replace(/<!--TOOL_END:[^>]*-->/g, '');
-    
-    // 移除其他孤立的工具标记
-    html = html.replace(/<!--TOOL_(?:START|DENIED)[^>]*-->/g, '');
+    // 移除孤立的工具标记
+    html = html.replace(/<!--TOOL_(?:END|START|DENIED|BLOCK|UPDATE|PLACEHOLDER)[^>]*-->/g, '');
     
     // 完整代码块处理
     html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
@@ -1208,17 +1255,30 @@ function App() {
       return table;
     });
     
-    // 行内代码（避免匹配代码块内的反引号）
+    // 行内代码
     html = html.replace(/`([^`\n]+)`/g, '<code class="inline">$1</code>');
     // 粗体
     html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // 斜体
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    // 链接 [text](url)
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
     // 标题
     html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
     html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
     html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
-    // 列表
-    html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
-    html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+    // 无序列表
+    html = html.replace(/^- (.+)$/gm, '<li class="ul-item">$1</li>');
+    html = html.replace(/^• (.+)$/gm, '<li class="ul-item">$1</li>');
+    html = html.replace(/(<li class="ul-item">.*<\/li>\n?)+/g, '<ul>$&</ul>');
+    // 有序列表
+    html = html.replace(/^\d+\. (.+)$/gm, '<li class="ol-item">$1</li>');
+    html = html.replace(/(<li class="ol-item">.*<\/li>\n?)+/g, '<ol>$&</ol>');
+    // 分隔线
+    html = html.replace(/^---$/gm, '<hr>');
+    // 清理工具块前后的空行
+    html = html.replace(/\n*(<details class="tb)/g, '$1');
+    html = html.replace(/(<\/details>)\n*/g, '$1');
     // 换行
     html = html.replace(/\n/g, '<br>');
     
@@ -1229,161 +1289,120 @@ function App() {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   };
 
+  // 获取工具的中文描述、图标和详情
+  const getToolInfo = (tool: string, input: any, data: any): { icon: string; desc: string; details: string } => {
+    switch (tool) {
+      case 'Read':
+        return { icon: '📄', desc: '读取文件', details: data?.file?.filePath || input?.file_path || '' };
+      case 'Write':
+        return { icon: '✏️', desc: '写入文件', details: data?.filePath || input?.file_path || '' };
+      case 'Edit':
+      case 'StrReplace':
+        return { icon: '🔧', desc: '编辑文件', details: data?.filePath || input?.file_path || input?.path || '' };
+      case 'Delete':
+        return { icon: '🗑️', desc: '删除文件', details: data?.filePath || input?.file_path || '' };
+      case 'Bash': {
+        const cmd = (input?.command || '').toLowerCase();
+        let desc = '执行命令';
+        if (cmd.startsWith('git ')) desc = 'Git 操作';
+        else if (cmd.startsWith('npm ') || cmd.startsWith('yarn ')) desc = '包管理';
+        else if (cmd.startsWith('cd ')) desc = '切换目录';
+        return { icon: '💻', desc, details: input?.command?.substring(0, 50) || '' };
+      }
+      case 'Shell':
+        return { icon: '⚙️', desc: input?.description || '执行命令', details: input?.command?.substring(0, 50) || '' };
+      case 'Glob':
+        return { icon: '🔍', desc: '搜索文件', details: `${input?.pattern || ''} (${data?.count || 0} 个)` };
+      case 'Grep':
+        return { icon: '🔎', desc: '搜索内容', details: `${input?.pattern || ''} (${data?.count || 0} 个匹配)` };
+      case 'WebFetch':
+        return { icon: '🌐', desc: '获取网页', details: input?.url || '' };
+      case 'WebSearch':
+        return { icon: '🔍', desc: '网络搜索', details: input?.query || '' };
+      case 'Task':
+        return { icon: '📋', desc: '执行子任务', details: input?.description || '' };
+      case 'TodoWrite':
+        return { icon: '✅', desc: '更新任务', details: `${input?.todos?.length || 0} 个任务` };
+      case 'SemanticSearch':
+        return { icon: '🧠', desc: '语义搜索', details: input?.query?.substring(0, 40) || '' };
+      case 'ReadLints':
+        return { icon: '⚠️', desc: '检查代码', details: input?.paths?.join(', ') || '全部文件' };
+      default:
+        return { icon: '🔧', desc: tool, details: '' };
+    }
+  };
+
   const renderToolResult = (result: ToolResult) => {
     const { tool, input, success, data, error } = result;
+    const { icon, desc, details } = getToolInfo(tool, input, data);
     
+    // 错误状态
     if (!success) {
       return (
-        <div className="tool-result error">
-          <div className="tool-header">
-            <span className="tool-icon">❌</span>
-            <span className="tool-name">{tool}</span>
+        <div className="tool-card-cursor error">
+          <span className="tool-card-icon">{icon}</span>
+          <div className="tool-card-content">
+            <span className="tool-card-desc">{desc}</span>
+            <span className="tool-card-details tool-error-text">{error}</span>
           </div>
-          <div className="tool-error">{error}</div>
+          <span className="tool-card-status-icon error">✗</span>
         </div>
       );
     }
 
-    switch (tool) {
-      case 'Read':
-        const readData = data as any;
-        if (readData?.type === 'image') {
-          return (
-            <div className="tool-result">
-              <div className="tool-header">
-                <span className="tool-icon">🖼️</span>
-                <span className="tool-name">Read: {readData.file?.filePath}</span>
+    // 特殊处理：图片预览
+    if (tool === 'Read') {
+      const readData = data as any;
+      if (readData?.type === 'image') {
+        return (
+          <div className="tool-card-cursor-expanded">
+            <div className="tool-card-cursor success">
+              <span className="tool-card-icon">🖼️</span>
+              <div className="tool-card-content">
+                <span className="tool-card-desc">读取图片</span>
+                <span className="tool-card-details">{readData.file?.filePath}</span>
               </div>
-              <img 
-                src={`data:${readData.file?.mimeType};base64,${readData.file?.base64}`}
-                alt={readData.file?.filePath}
-                className="tool-image"
-              />
+              <span className="tool-card-status-icon success">✓</span>
             </div>
-          );
-        }
-        return (
-          <div className="tool-result">
-            <div className="tool-header">
-              <span className="tool-icon">📄</span>
-              <span className="tool-name">Read: {readData?.file?.filePath}</span>
-              <span className="tool-meta">
-                行 {readData?.file?.startLine}-{readData?.file?.startLine + readData?.file?.numLines - 1} / {readData?.file?.totalLines}
-              </span>
-            </div>
+            <img 
+              src={`data:${readData.file?.mimeType};base64,${readData.file?.base64}`}
+              alt={readData.file?.filePath}
+              className="tool-image"
+            />
           </div>
         );
-      
-      case 'Write':
-        const writeData = data as any;
-        return (
-          <div className="tool-result success">
-            <div className="tool-header">
-              <span className="tool-icon">✏️</span>
-              <span className="tool-name">Write: {writeData?.filePath}</span>
-              <span className="tool-meta">{writeData?.bytesWritten} bytes</span>
-            </div>
-          </div>
-        );
-      
-      case 'Edit':
-        const editData = data as any;
-        return (
-          <div className="tool-result success">
-            <div className="tool-header">
-              <span className="tool-icon">🔧</span>
-              <span className="tool-name">Edit: {editData?.filePath}</span>
-              <span className="tool-meta">{editData?.replacements} 处替换</span>
-            </div>
-          </div>
-        );
-      
-      case 'Bash':
-        const bashData = data as any;
-        return (
-          <div className="tool-result">
-            <div className="tool-header">
-              <span className="tool-icon">💻</span>
-              <span className="tool-name">Bash</span>
-              <span className={`tool-exit-code ${bashData?.exitCode === 0 ? 'success' : 'error'}`}>
-                退出码: {bashData?.exitCode}
-              </span>
-            </div>
-            {bashData?.stdout && (
-              <pre className="tool-output">{bashData.stdout.slice(0, 500)}</pre>
-            )}
-            {bashData?.stderr && (
-              <pre className="tool-output stderr">{bashData.stderr.slice(0, 300)}</pre>
-            )}
-          </div>
-        );
-      
-      case 'Glob':
-        const globData = data as any;
-        return (
-          <div className="tool-result">
-            <div className="tool-header">
-              <span className="tool-icon">🔍</span>
-              <span className="tool-name">Glob</span>
-              <span className="tool-meta">找到 {globData?.count} 个文件</span>
-            </div>
-            {globData?.files?.length > 0 && (
-              <div className="tool-files">
-                {globData.files.slice(0, 10).map((f: string, i: number) => (
-                  <div key={i} className="file-item">📄 {f}</div>
-                ))}
-                {globData.files.length > 10 && (
-                  <div className="file-more">... 还有 {globData.files.length - 10} 个文件</div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      
-      case 'Grep':
-        const grepData = data as any;
-        return (
-          <div className="tool-result">
-            <div className="tool-header">
-              <span className="tool-icon">🔎</span>
-              <span className="tool-name">Grep</span>
-              <span className="tool-meta">{grepData?.count} 个匹配</span>
-            </div>
-            {grepData?.matches?.length > 0 && (
-              <div className="tool-matches">
-                {grepData.matches.slice(0, 5).map((m: any, i: number) => (
-                  <div key={i} className="match-item">
-                    <span className="match-file">{m.file}:{m.line}</span>
-                    <span className="match-content">{m.content.slice(0, 100)}</span>
-                  </div>
-                ))}
-                {grepData.matches.length > 5 && (
-                  <div className="match-more">... 还有 {grepData.matches.length - 5} 个匹配</div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      
-      default:
-        return (
-          <div className="tool-result">
-            <div className="tool-header">
-              <span className="tool-icon">🔧</span>
-              <span className="tool-name">{tool}</span>
-            </div>
-            <pre className="tool-output">{JSON.stringify(data, null, 2)}</pre>
-          </div>
-        );
+      }
     }
+
+    // 统一的 Cursor 风格卡片
+    return (
+      <div className="tool-card-cursor success">
+        <span className="tool-card-icon">{icon}</span>
+        <div className="tool-card-content">
+          <span className="tool-card-desc">{desc}</span>
+          <span className="tool-card-details">{details}</span>
+        </div>
+        <span className="tool-card-status-icon success">✓</span>
+      </div>
+    );
   };
 
-  // 处理复制和执行按钮点击
+  // 处理复制、执行按钮和工具块展开点击
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       const index = parseInt(target.getAttribute('data-index') || '0');
       const block = codeBlocksRef.current[index];
+      
+      // 处理工具块展开/收起
+      const toolHeader = target.closest('.tool-block-header');
+      if (toolHeader) {
+        const toolBlock = toolHeader.closest('.tool-block');
+        if (toolBlock) {
+          toolBlock.classList.toggle('expanded');
+          return;
+        }
+      }
       
       if (target.classList.contains('copy-btn') && block) {
         navigator.clipboard.writeText(block.code);
@@ -2028,13 +2047,6 @@ function App() {
                   <div className="message-images">
                     {msg.images.map((img, imgIdx) => (
                       <img key={imgIdx} src={img} alt={`发送的图片 ${imgIdx + 1}`} className="sent-image" />
-                    ))}
-                  </div>
-                )}
-                {msg.toolResults && msg.toolResults.length > 0 && (
-                  <div className="tool-results">
-                    {msg.toolResults.map((result, idx) => (
-                      <div key={idx}>{renderToolResult(result)}</div>
                     ))}
                   </div>
                 )}

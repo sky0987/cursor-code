@@ -3365,10 +3365,46 @@ async function handleToolCall(toolName, input, context = {}) {
     // 获取工具图标
     const toolIcon = getToolIcon(toolName);
     const inputSummary = getToolInputSummary(toolName, input);
+    const toolId = `tool_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    // 流式输出工具开始执行 - 使用特殊标记
+    // 格式化输入命令用于显示
+    const formatInputForDisplay = (name, inp) => {
+        switch (name) {
+            case 'Bash':
+            case 'Shell':
+            case 'PowerShell':
+                return inp.command || '';
+            case 'Read':
+                return inp.file_path || inp.path || '';
+            case 'Write':
+                return inp.file_path || inp.path || '';
+            case 'Edit':
+            case 'StrReplace':
+                return inp.file_path || inp.path || '';
+            case 'Delete':
+                return inp.file_path || inp.path || '';
+            case 'Glob':
+                return inp.pattern || '';
+            case 'Grep':
+                return `${inp.pattern || ''}${inp.path ? ` in ${inp.path}` : ''}`;
+            default:
+                return JSON.stringify(inp).slice(0, 100);
+        }
+    };
+    
+    const inputDisplay = formatInputForDisplay(toolName, input);
+    
+    // 流式输出工具开始执行 - 使用 JSON 格式传递完整信息
     if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('chat-stream', `\n<!--TOOL_START:${toolName}:${toolIcon}:${inputSummary}-->\n`);
+        const startData = JSON.stringify({
+            id: toolId,
+            tool: toolName,
+            icon: toolIcon,
+            desc: inputSummary.split('|')[0] || toolName,
+            input: inputDisplay,
+            status: 'running'
+        });
+        mainWindow.webContents.send('chat-stream', `<!--TOOL_BLOCK:${startData}-->`);
     }
     
     try {
@@ -3395,9 +3431,51 @@ async function handleToolCall(toolName, input, context = {}) {
         toolStats.successfulCalls++;
         toolStats.totalDurationMs += durationMs;
         
-        // 流式输出执行结果 - 使用特殊标记
+        // 格式化输出用于显示
+        const formatOutputForDisplay = (name, res) => {
+            if (!res) return 'No output';
+            switch (name) {
+                case 'Bash':
+                case 'Shell':
+                case 'PowerShell':
+                    return res.stdout || res.stderr || 'No output';
+                case 'Read':
+                    if (res.type === 'text' && res.file?.content) {
+                        return res.file.content.slice(0, 500);
+                    }
+                    return res.file?.filePath || 'File read';
+                case 'Write':
+                    return `写入 ${res.bytesWritten || 0} bytes`;
+                case 'Edit':
+                case 'StrReplace':
+                    return `${res.replacements || 0} 处替换`;
+                case 'Delete':
+                    return res.message || '已删除';
+                case 'Glob':
+                    const files = res.files || [];
+                    return files.length > 0 ? files.slice(0, 10).join('\n') : 'No files found';
+                case 'Grep':
+                    const matches = res.matches || [];
+                    if (matches.length > 0) {
+                        return matches.slice(0, 5).map(m => `${m.file}:${m.line}: ${m.content?.slice(0, 60) || ''}`).join('\n');
+                    }
+                    return 'No matches';
+                default:
+                    return typeof res === 'string' ? res.slice(0, 300) : JSON.stringify(res).slice(0, 300);
+            }
+        };
+        
+        const outputDisplay = formatOutputForDisplay(toolName, result);
+        
+        // 流式输出执行结果 - 更新工具块
         if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('chat-stream', `<!--TOOL_END:success:${durationMs}-->\n`);
+            const endData = JSON.stringify({
+                id: toolId,
+                status: 'success',
+                duration: durationMs,
+                output: outputDisplay
+            });
+            mainWindow.webContents.send('chat-stream', `<!--TOOL_UPDATE:${endData}-->`);
         }
         
         // 发送进度完成事件
@@ -3423,9 +3501,15 @@ async function handleToolCall(toolName, input, context = {}) {
         toolStats.failedCalls++;
         toolStats.totalDurationMs += durationMs;
         
-        // 流式输出错误 - 使用特殊标记
+        // 流式输出错误 - 更新工具块
         if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('chat-stream', `<!--TOOL_END:error:${durationMs}:${err.message}-->\n`);
+            const errorData = JSON.stringify({
+                id: toolId,
+                status: 'error',
+                duration: durationMs,
+                output: err.message
+            });
+            mainWindow.webContents.send('chat-stream', `<!--TOOL_UPDATE:${errorData}-->`);
         }
         
         // 发送进度错误事件
@@ -3486,58 +3570,166 @@ function getToolIcon(toolName) {
 
 /**
  * 获取工具输入摘要，用于流式输出
+ * 返回格式: "描述|详情" 用于 Cursor 风格显示
  */
 function getToolInputSummary(toolName, input) {
     switch (toolName) {
         case 'Read':
-            return `\`${input.file_path}\``;
+            return `读取文件|${input.file_path}`;
         case 'Write':
-            return `\`${input.file_path}\` (${input.content?.length || 0} chars)`;
+            return `写入文件|${input.file_path}`;
         case 'Edit':
-            return `\`${input.file_path}\``;
+        case 'StrReplace':
+            return `编辑文件|${input.file_path || input.path}`;
         case 'Delete':
-            return `\`${input.file_path}\``;
+            return `删除文件|${input.file_path}`;
         case 'Bash':
-            return `\`${input.command?.substring(0, 50)}${input.command?.length > 50 ? '...' : ''}\``;
-        case 'Shell':
-            return `\`${input.command?.substring(0, 50)}${input.command?.length > 50 ? '...' : ''}\``;
+        case 'Shell': {
+            const cmd = input.command || '';
+            const desc = input.description || getCommandDescription(cmd);
+            const details = extractCommandDetails(cmd);
+            return `${desc}|${details}`;
+        }
         case 'Glob':
-            return `\`${input.pattern}\``;
+            return `搜索文件|${input.pattern}`;
         case 'Grep':
-            return `\`${input.pattern}\`${input.path ? ` in ${input.path}` : ''}`;
+            return `搜索内容|${input.pattern}${input.path ? ` in ${input.path}` : ''}`;
         case 'WebFetch':
-            return `\`${input.url}\``;
+            return `获取网页|${input.url}`;
         case 'WebSearch':
-            return `"${input.query}"`;
+            return `网络搜索|${input.query}`;
         case 'Remote':
-            return `${input.action}${input.session_id ? ` (${input.session_id})` : ''}`;
-        // Claude Code 新增工具
+            return `远程操作 ${input.action}|${input.session_id || ''}`;
         case 'NotebookEdit':
         case 'EditNotebook':
-            return `\`${input.target_notebook}\` cell ${input.cell_idx}`;
+            return `编辑 Notebook|${input.target_notebook} cell ${input.cell_idx}`;
         case 'TodoWrite':
-            return `${input.todos?.length || 0} 个任务`;
+            return `更新任务列表|${input.todos?.length || 0} 个任务`;
         case 'Task':
-            return `${input.description?.substring(0, 30) || ''}`;
+            return `执行子任务|${input.description?.substring(0, 40) || ''}`;
         case 'AskQuestion':
-            return `${input.questions?.length || 0} 个问题`;
+            return `询问用户|${input.questions?.length || 0} 个问题`;
         case 'SemanticSearch':
-            return `"${input.query?.substring(0, 30) || ''}"`;
+            return `语义搜索|${input.query?.substring(0, 40) || ''}`;
         case 'ReadLints':
-            return `${input.paths?.length || 0} 个路径`;
+            return `检查代码问题|${input.paths?.join(', ') || '全部文件'}`;
         case 'LS':
-            return `\`${input.path || '.'}\``;
+            return `列出目录|${input.path || '.'}`;
         case 'PowerShell':
-            return `\`${input.command?.substring(0, 50)}${input.command?.length > 50 ? '...' : ''}\``;
+            return `执行 PowerShell|${input.command?.substring(0, 50) || ''}`;
         case 'Compact':
-            return `${input.messages?.length || 0} 条消息`;
+            return `压缩消息|${input.messages?.length || 0} 条`;
         case 'FileHistory':
-            return `${input.action} ${input.file_path || ''}`;
+            return `文件历史 ${input.action}|${input.file_path || ''}`;
         case 'TokenCount':
-            return input.text ? `${input.text.length} 字符` : `${input.messages?.length || 0} 条消息`;
+            return `统计 Token|${input.text ? `${input.text.length} 字符` : `${input.messages?.length || 0} 条消息`}`;
         default:
-            return '';
+            return `${toolName}|`;
     }
+}
+
+/**
+ * 从命令中提取主要详情（命令名和关键参数）
+ */
+function extractCommandDetails(cmd) {
+    if (!cmd) return '';
+    // 提取命令的主要部分，去除复杂参数
+    const parts = cmd.trim().split(/\s+/);
+    const mainCmd = parts[0] || '';
+    // 获取关键参数（最多3个）
+    const args = parts.slice(1, 4).filter(a => !a.startsWith('-') || a.length <= 3);
+    return [mainCmd, ...args].join(', ').substring(0, 50);
+}
+
+/**
+ * 根据命令内容生成中文描述
+ */
+function getCommandDescription(cmd) {
+    if (!cmd) return '执行命令';
+    const lowerCmd = cmd.toLowerCase();
+    
+    // Git 命令
+    if (lowerCmd.startsWith('git ')) {
+        if (lowerCmd.includes('status')) return '检查 Git 状态';
+        if (lowerCmd.includes('add')) return 'Git 添加文件';
+        if (lowerCmd.includes('commit')) return 'Git 提交更改';
+        if (lowerCmd.includes('push')) return 'Git 推送代码';
+        if (lowerCmd.includes('pull')) return 'Git 拉取代码';
+        if (lowerCmd.includes('clone')) return 'Git 克隆仓库';
+        if (lowerCmd.includes('checkout')) return 'Git 切换分支';
+        if (lowerCmd.includes('branch')) return 'Git 分支操作';
+        if (lowerCmd.includes('merge')) return 'Git 合并分支';
+        if (lowerCmd.includes('log')) return '查看 Git 日志';
+        if (lowerCmd.includes('diff')) return '查看 Git 差异';
+        return 'Git 操作';
+    }
+    
+    // npm/yarn/pnpm 命令
+    if (lowerCmd.startsWith('npm ') || lowerCmd.startsWith('yarn ') || lowerCmd.startsWith('pnpm ')) {
+        if (lowerCmd.includes('install') || lowerCmd.includes(' i ')) return '安装依赖';
+        if (lowerCmd.includes('run ')) return '运行脚本';
+        if (lowerCmd.includes('start')) return '启动项目';
+        if (lowerCmd.includes('build')) return '构建项目';
+        if (lowerCmd.includes('test')) return '运行测试';
+        if (lowerCmd.includes('init')) return '初始化项目';
+        return '包管理操作';
+    }
+    
+    // 文件操作
+    if (lowerCmd.startsWith('mkdir')) return '创建目录';
+    if (lowerCmd.startsWith('rm ') || lowerCmd.startsWith('del ')) return '删除文件';
+    if (lowerCmd.startsWith('cp ') || lowerCmd.startsWith('copy ')) return '复制文件';
+    if (lowerCmd.startsWith('mv ') || lowerCmd.startsWith('move ')) return '移动文件';
+    if (lowerCmd.startsWith('cat ') || lowerCmd.startsWith('type ')) return '查看文件';
+    if (lowerCmd.startsWith('ls') || lowerCmd.startsWith('dir')) return '列出文件';
+    if (lowerCmd.startsWith('cd ')) return '切换目录';
+    if (lowerCmd.startsWith('pwd')) return '显示当前目录';
+    if (lowerCmd.startsWith('touch ')) return '创建文件';
+    if (lowerCmd.startsWith('chmod ')) return '修改权限';
+    
+    // 系统命令
+    if (lowerCmd.startsWith('echo ')) return '输出内容';
+    if (lowerCmd.startsWith('date')) return '显示日期时间';
+    if (lowerCmd.startsWith('whoami')) return '显示当前用户';
+    if (lowerCmd.startsWith('hostname')) return '显示主机名';
+    if (lowerCmd.startsWith('ping ')) return '网络连通测试';
+    if (lowerCmd.startsWith('curl ') || lowerCmd.startsWith('wget ')) return '下载/请求网络';
+    if (lowerCmd.startsWith('ssh ')) return 'SSH 连接';
+    if (lowerCmd.startsWith('scp ')) return 'SCP 传输文件';
+    
+    // Python
+    if (lowerCmd.startsWith('python') || lowerCmd.startsWith('pip')) {
+        if (lowerCmd.includes('pip install')) return '安装 Python 包';
+        if (lowerCmd.includes('pip ')) return 'Pip 操作';
+        return '运行 Python';
+    }
+    
+    // Docker
+    if (lowerCmd.startsWith('docker ')) {
+        if (lowerCmd.includes('build')) return 'Docker 构建镜像';
+        if (lowerCmd.includes('run')) return 'Docker 运行容器';
+        if (lowerCmd.includes('ps')) return 'Docker 查看容器';
+        if (lowerCmd.includes('pull')) return 'Docker 拉取镜像';
+        if (lowerCmd.includes('push')) return 'Docker 推送镜像';
+        return 'Docker 操作';
+    }
+    
+    // PowerShell 特有
+    if (lowerCmd.startsWith('get-')) return '获取信息';
+    if (lowerCmd.startsWith('set-')) return '设置配置';
+    if (lowerCmd.startsWith('new-')) return '创建对象';
+    if (lowerCmd.startsWith('test-')) return '测试检查';
+    if (lowerCmd.startsWith('invoke-')) return '调用命令';
+    
+    // 搜索
+    if (lowerCmd.startsWith('find ') || lowerCmd.startsWith('grep ') || lowerCmd.startsWith('rg ')) return '搜索内容';
+    
+    // 进程
+    if (lowerCmd.startsWith('ps ') || lowerCmd.includes('tasklist')) return '查看进程';
+    if (lowerCmd.startsWith('kill ') || lowerCmd.includes('taskkill')) return '终止进程';
+    
+    // 默认
+    return '执行命令';
 }
 
 /**
