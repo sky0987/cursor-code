@@ -45,6 +45,33 @@ interface Message {
   toolResults?: ToolResult[];
 }
 
+// 会话接口
+interface Session {
+  id: string;
+  title: string;
+  messages: Message[];
+  provider: string;
+  model: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// 生成会话ID
+const generateSessionId = () => {
+  return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+};
+
+// 从消息生成会话标题
+const generateSessionTitle = (messages: Message[]): string => {
+  if (messages.length === 0) return '新会话';
+  const firstUserMsg = messages.find(m => m.role === 'user');
+  if (firstUserMsg) {
+    const title = firstUserMsg.content.slice(0, 30);
+    return title.length < firstUserMsg.content.length ? title + '...' : title;
+  }
+  return '新会话';
+};
+
 interface FileItem {
   name: string;
   isDir: boolean;
@@ -225,23 +252,20 @@ const API_PROVIDERS: Record<ApiProvider, {
     needsProxy: true,
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     models: [
-      // Gemini 3 系列 (最新)
+      // Gemini 3 系列 (最新 - Preview)
       { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview (最新)', group: 'Gemini 3 系列' },
-      { id: 'gemini-3-flash', name: 'Gemini 3 Flash', group: 'Gemini 3 系列' },
-      { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash-Lite', group: 'Gemini 3 系列' },
-      { id: 'gemini-3.1-flash-live', name: 'Gemini 3.1 Flash Live', group: 'Gemini 3 系列' },
-      // Gemini 2.5 系列
+      { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview', group: 'Gemini 3 系列' },
+      { id: 'gemini-3.1-flash-lite-preview', name: 'Gemini 3.1 Flash-Lite Preview', group: 'Gemini 3 系列' },
+      // Gemini 2.5 系列 (稳定)
       { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', group: 'Gemini 2.5 系列' },
       { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', group: 'Gemini 2.5 系列' },
       { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash-Lite', group: 'Gemini 2.5 系列' },
-      { id: 'gemini-2.5-flash-live-preview', name: 'Gemini 2.5 Flash Live', group: 'Gemini 2.5 系列' },
-      // Gemini 2.0 系列
-      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', group: 'Gemini 2.0 系列' },
-      { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash Exp', group: 'Gemini 2.0 系列' },
-      // Gemini 1.5 系列
-      { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', group: 'Gemini 1.5 系列' },
-      { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', group: 'Gemini 1.5 系列' },
-      { id: 'gemini-1.5-flash-8b', name: 'Gemini 1.5 Flash-8B', group: 'Gemini 1.5 系列' },
+      // Gemini 2.0 系列 (即将弃用)
+      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash (即将弃用)', group: 'Gemini 2.0 系列' },
+      { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash-Lite (即将弃用)', group: 'Gemini 2.0 系列' },
+      // 特殊模型
+      { id: 'gemini-flash-latest', name: 'Gemini Flash Latest (自动更新)', group: '特殊版本' },
+      { id: 'gemini-embedding-001', name: 'Gemini Embedding', group: '嵌入模型' },
     ],
   },
   deepseek: {
@@ -348,20 +372,21 @@ const API_PROVIDERS: Record<ApiProvider, {
       // Mistral
       { id: 'mistralai/mistral-large', name: 'Mistral Large', group: 'Mistral' },
       { id: 'mistralai/codestral', name: 'Codestral', group: 'Mistral' },
-      // 免费模型 (2026年4月最新)
+      // 免费模型 (2026年4月8日更新，按热度排序)
       { id: 'qwen/qwen3.6-plus:free', name: 'Qwen 3.6 Plus (1M上下文)', group: '免费模型' },
       { id: 'stepfun/step-3.5-flash:free', name: 'Step 3.5 Flash (256K)', group: '免费模型' },
-      { id: 'nvidia/nemotron-3-super-120b-a12b:free', name: 'Nemotron 3 Super 120B (262K)', group: '免费模型' },
+      { id: 'nvidia/nemotron-3-super-120b-a12b:free', name: 'Nemotron 3 Super (262K/1M)', group: '免费模型' },
       { id: 'arcee-ai/trinity-large-preview:free', name: 'Trinity Large 400B (131K)', group: '免费模型' },
+      { id: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B (262K/视觉)', group: '免费模型' },
       { id: 'z-ai/glm-4.5-air:free', name: 'GLM 4.5 Air (131K)', group: '免费模型' },
       { id: 'nvidia/nemotron-3-nano-30b-a3b:free', name: 'Nemotron 3 Nano 30B (256K)', group: '免费模型' },
       { id: 'minimax/minimax-m2.5:free', name: 'MiniMax M2.5 (197K)', group: '免费模型' },
-      { id: 'arcee-ai/trinity-mini:free', name: 'Trinity Mini 26B (131K)', group: '免费模型' },
-      { id: 'nvidia/nemotron-nano-12b-v2-vl:free', name: 'Nemotron Nano 12B VL (128K)', group: '免费模型' },
+      { id: 'venice/venice-uncensored:free', name: 'Venice Uncensored (33K)', group: '免费模型' },
       { id: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (131K)', group: '免费模型' },
+      { id: 'arcee-ai/trinity-mini:free', name: 'Trinity Mini 26B (131K) ⚠️4/10下线', group: '免费模型' },
+      { id: 'nvidia/nemotron-nano-12b-v2-vl:free', name: 'Nemotron Nano 12B VL (128K/视觉)', group: '免费模型' },
+      { id: 'nvidia/nemotron-nano-9b-v2:free', name: 'Nemotron Nano 9B V2 (128K)', group: '免费模型' },
       { id: 'qwen/qwen3-next-80b-a3b-instruct:free', name: 'Qwen3 Next 80B (262K)', group: '免费模型' },
-      { id: 'liquid/lfm-2.5-1.2b-thinking:free', name: 'LFM 2.5 Thinking (32K)', group: '免费模型' },
-      { id: 'liquid/lfm-2.5-1.2b-instruct:free', name: 'LFM 2.5 Instruct (32K)', group: '免费模型' },
       { id: 'google/gemma-2-9b-it:free', name: 'Gemma 2 9B', group: '免费模型' },
       { id: 'meta-llama/llama-3.2-3b-instruct:free', name: 'Llama 3.2 3B', group: '免费模型' },
     ],
@@ -434,11 +459,171 @@ interface RemoteFileItem {
 }
 
 function App() {
+  // ==================== 多会话管理 ====================
+  // 所有会话列表
+  const [sessions, setSessions] = useState<Session[]>(() => {
+    const saved = localStorage.getItem('chat-sessions');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error('Failed to parse sessions:', e);
+      }
+    }
+    // 默认创建一个新会话
+    const defaultSession: Session = {
+      id: generateSessionId(),
+      title: '新会话',
+      messages: [],
+      provider: 'cursor2api',
+      model: 'claude-sonnet-4-6',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    return [defaultSession];
+  });
+  
+  // 当前会话ID
+  const [currentSessionId, setCurrentSessionId] = useState<string>(() => {
+    const saved = localStorage.getItem('current-session-id');
+    if (saved) return saved;
+    const sessionsData = localStorage.getItem('chat-sessions');
+    if (sessionsData) {
+      try {
+        const parsed = JSON.parse(sessionsData);
+        if (parsed.length > 0) return parsed[0].id;
+      } catch (e) {}
+    }
+    return '';
+  });
+  
+  // 获取当前会话（如果ID无效则使用第一个会话）
+  const currentSession = sessions.find(s => s.id === currentSessionId) || sessions[0];
+  
+  // 确保 currentSessionId 始终有效
+  useEffect(() => {
+    if (!currentSessionId || !sessions.find(s => s.id === currentSessionId)) {
+      if (sessions.length > 0) {
+        setCurrentSessionId(sessions[0].id);
+        localStorage.setItem('current-session-id', sessions[0].id);
+      }
+    }
+  }, [sessions, currentSessionId]);
+  
+  // 当前会话的消息
   const [messages, setMessages] = useState<Message[]>(() => {
-    // 从 localStorage 恢复历史消息
+    if (currentSession) return currentSession.messages;
+    // 兼容旧版本：从旧的 localStorage 恢复
     const saved = localStorage.getItem('chat-history');
     return saved ? JSON.parse(saved) : [];
   });
+  
+  // 保存会话到 localStorage
+  const saveSessionsToStorage = (newSessions: Session[]) => {
+    localStorage.setItem('chat-sessions', JSON.stringify(newSessions));
+  };
+  
+  // 更新当前会话的消息
+  const updateCurrentSessionMessages = (newMessages: Message[]) => {
+    setMessages(newMessages);
+    setSessions(prev => {
+      const updated = prev.map(s => {
+        if (s.id === currentSessionId) {
+          return {
+            ...s,
+            messages: newMessages,
+            title: generateSessionTitle(newMessages),
+            updatedAt: Date.now(),
+          };
+        }
+        return s;
+      });
+      saveSessionsToStorage(updated);
+      return updated;
+    });
+  };
+  
+  // 创建新会话
+  const createNewSession = () => {
+    const newSession: Session = {
+      id: generateSessionId(),
+      title: '新会话',
+      messages: [],
+      provider: currentProvider,
+      model: currentConfig.selectedModel,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    setSessions(prev => {
+      const updated = [newSession, ...prev];
+      saveSessionsToStorage(updated);
+      return updated;
+    });
+    setCurrentSessionId(newSession.id);
+    setMessages([]);
+    localStorage.setItem('current-session-id', newSession.id);
+  };
+  
+  // 切换会话
+  const switchSession = (sessionId: string) => {
+    const session = sessions.find(s => s.id === sessionId);
+    if (session) {
+      setCurrentSessionId(sessionId);
+      setMessages(session.messages);
+      localStorage.setItem('current-session-id', sessionId);
+    }
+  };
+  
+  // 删除会话
+  const deleteSession = (sessionId: string) => {
+    setSessions(prev => {
+      const updated = prev.filter(s => s.id !== sessionId);
+      // 如果删除的是当前会话，切换到第一个会话
+      if (sessionId === currentSessionId && updated.length > 0) {
+        setCurrentSessionId(updated[0].id);
+        setMessages(updated[0].messages);
+        localStorage.setItem('current-session-id', updated[0].id);
+      } else if (updated.length === 0) {
+        // 如果没有会话了，创建一个新的
+        const newSession: Session = {
+          id: generateSessionId(),
+          title: '新会话',
+          messages: [],
+          provider: currentProvider,
+          model: currentConfig.selectedModel,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        updated.push(newSession);
+        setCurrentSessionId(newSession.id);
+        setMessages([]);
+        localStorage.setItem('current-session-id', newSession.id);
+      }
+      saveSessionsToStorage(updated);
+      return updated;
+    });
+  };
+  
+  // 清空当前会话
+  const clearCurrentSession = () => {
+    setMessages([]);
+    setSessions(prev => {
+      const updated = prev.map(s => {
+        if (s.id === currentSessionId) {
+          return {
+            ...s,
+            messages: [],
+            title: '新会话',
+            updatedAt: Date.now(),
+          };
+        }
+        return s;
+      });
+      saveSessionsToStorage(updated);
+      return updated;
+    });
+  };
+
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [streamText, setStreamText] = useState('');
@@ -462,6 +647,45 @@ function App() {
     requestId: string;
     description: string;
   } | null>(null);
+  
+  // 新功能状态
+  const [activePlan, setActivePlan] = useState<{
+    id: string;
+    title: string;
+    steps: Array<{ name: string; description?: string; status: string }>;
+    status: string;
+    currentStep: number;
+  } | null>(null);
+  
+  const [todos, setTodos] = useState<Array<{
+    id: string;
+    content: string;
+    status: string;
+    priority: string;
+  }>>([]);
+  
+  const [skills, setSkills] = useState<Array<{
+    id: string;
+    name: string;
+    description: string;
+    category: string;
+    builtin: boolean;
+  }>>([]);
+  
+  const [userQuestion, setUserQuestion] = useState<{
+    questionId: string;
+    question: string;
+    options?: string[];
+    type: string;
+    defaultValue?: string;
+  } | null>(null);
+  
+  const [showSkillsPanel, setShowSkillsPanel] = useState(false);
+  const [showTodosPanel, setShowTodosPanel] = useState(false);
+  const [showPlanDetail, setShowPlanDetail] = useState(false);
+  const [showCreateSkill, setShowCreateSkill] = useState(false);
+  const [newSkill, setNewSkill] = useState({ name: '', description: '', steps: '' });
+  
   // 当前选择的厂商
   const [currentProvider, setCurrentProvider] = useState<ApiProvider>(() => {
     return (localStorage.getItem('current-provider') as ApiProvider) || 'cursor2api';
@@ -575,10 +799,49 @@ function App() {
         ...data
       });
     };
+    
+    // 计划相关事件
+    const handlePlanCreated = (_: any, plan: any) => {
+      setActivePlan(plan);
+    };
+    
+    const handlePlanUpdated = (_: any, plan: any) => {
+      setActivePlan(plan);
+      if (plan.status === 'completed' || plan.status === 'cancelled') {
+        setTimeout(() => setActivePlan(null), 3000);
+      }
+    };
+    
+    // 任务相关事件
+    const handleTodoUpdated = (_: any, data: any) => {
+      if (data.action === 'batch_update' || data.action === 'create') {
+        ipcRenderer.invoke('todo-list').then((result: any) => {
+          if (result.success) setTodos(result.todos);
+        });
+      } else if (data.action === 'delete') {
+        setTodos(prev => prev.filter(t => t.id !== data.id));
+      } else if (data.action === 'update' && data.todo) {
+        setTodos(prev => prev.map(t => t.id === data.todo.id ? data.todo : t));
+      }
+    };
+    
+    // 用户提问事件
+    const handleAskUser = (_: any, data: any) => {
+      setUserQuestion(data);
+    };
 
     ipcRenderer.on('tool-confirm-request', handleToolConfirm);
+    ipcRenderer.on('plan-created', handlePlanCreated);
+    ipcRenderer.on('plan-updated', handlePlanUpdated);
+    ipcRenderer.on('todo-updated', handleTodoUpdated);
+    ipcRenderer.on('ask-user', handleAskUser);
+    
     return () => {
       ipcRenderer.removeListener('tool-confirm-request', handleToolConfirm);
+      ipcRenderer.removeListener('plan-created', handlePlanCreated);
+      ipcRenderer.removeListener('plan-updated', handlePlanUpdated);
+      ipcRenderer.removeListener('todo-updated', handleTodoUpdated);
+      ipcRenderer.removeListener('ask-user', handleAskUser);
     };
   }, []);
 
@@ -590,6 +853,102 @@ function App() {
         approved
       });
       setToolConfirmation(null);
+    }
+  };
+  
+  // 处理计划审核
+  const handlePlanApprove = async () => {
+    if (activePlan) {
+      await ipcRenderer.invoke('plan-approve', activePlan.id);
+      showNotification('✅ 计划已批准，开始执行');
+    }
+  };
+  
+  const handlePlanCancel = async () => {
+    if (activePlan) {
+      await ipcRenderer.invoke('plan-cancel', activePlan.id);
+      setActivePlan(null);
+      showNotification('❌ 计划已取消');
+    }
+  };
+  
+  // 处理用户回答
+  const handleUserAnswer = async (answer: string | boolean | string[]) => {
+    if (userQuestion) {
+      await ipcRenderer.invoke('answer-question', {
+        questionId: userQuestion.questionId,
+        answer
+      });
+      setUserQuestion(null);
+    }
+  };
+  
+  // 加载技能列表
+  const loadSkills = async () => {
+    const result = await ipcRenderer.invoke('skill-list');
+    if (result.success) {
+      setSkills(result.skills);
+    }
+  };
+  
+  // 加载任务列表
+  const loadTodos = async () => {
+    const result = await ipcRenderer.invoke('todo-list');
+    if (result.success) {
+      setTodos(result.todos);
+    }
+  };
+  
+  // 执行技能
+  const executeSkill = async (skillId: string) => {
+    const result = await ipcRenderer.invoke('skill-execute', { skillId });
+    if (result.success) {
+      showNotification(`🎯 执行技能: ${result.skill.name}`);
+      // 将技能指令发送到聊天
+      setInput(result.instructions);
+      setShowSkillsPanel(false);
+    }
+  };
+  
+  // 创建自定义技能
+  const createCustomSkill = async () => {
+    if (!newSkill.name.trim()) {
+      showNotification('❌ 请输入技能名称');
+      return;
+    }
+    
+    // 解析步骤（每行一个步骤）
+    const stepsArray = newSkill.steps.split('\n')
+      .filter(s => s.trim())
+      .map((step, idx) => ({
+        name: `步骤 ${idx + 1}`,
+        description: step.trim(),
+        action: 'custom',
+      }));
+    
+    const result = await ipcRenderer.invoke('skill-create', {
+      name: newSkill.name,
+      description: newSkill.description,
+      steps: stepsArray,
+    });
+    
+    if (result.success) {
+      showNotification(`✅ 技能 "${newSkill.name}" 创建成功`);
+      setNewSkill({ name: '', description: '', steps: '' });
+      setShowCreateSkill(false);
+      loadSkills();
+    }
+  };
+  
+  // 删除技能
+  const deleteSkill = async (skillId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const result = await ipcRenderer.invoke('skill-delete', { skillId });
+    if (result.success) {
+      showNotification(`🗑️ 技能已删除`);
+      loadSkills();
+    } else {
+      showNotification(`❌ ${result.error}`);
     }
   };
 
@@ -749,12 +1108,28 @@ function App() {
     }
   };
 
-  // 保存消息到 localStorage
+  // 保存消息到会话（已在 updateCurrentSessionMessages 中处理）
+  // 同时保留旧的兼容逻辑
   useEffect(() => {
     if (messages.length > 0) {
-      localStorage.setItem('chat-history', JSON.stringify(messages.slice(-50))); // 保留最近50条
+      // 更新当前会话
+      setSessions(prev => {
+        const updated = prev.map(s => {
+          if (s.id === currentSessionId) {
+            return {
+              ...s,
+              messages: messages,
+              title: generateSessionTitle(messages),
+              updatedAt: Date.now(),
+            };
+          }
+          return s;
+        });
+        saveSessionsToStorage(updated);
+        return updated;
+      });
     }
-  }, [messages]);
+  }, [messages, currentSessionId]);
 
   useEffect(() => {
     loadCwd();
@@ -852,6 +1227,51 @@ function App() {
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
+
+  // 根据文件名获取图标
+  const getFileIcon = (name: string, isDir: boolean): string => {
+    if (isDir) return '📁';
+    const ext = name.split('.').pop()?.toLowerCase() || '';
+    const iconMap: Record<string, string> = {
+      // 代码文件
+      'js': '🟨', 'jsx': '⚛️', 'ts': '🔷', 'tsx': '⚛️',
+      'py': '🐍', 'java': '☕', 'go': '🔵', 'rs': '🦀',
+      'c': '©️', 'cpp': '©️', 'h': '📋', 'cs': '🟣',
+      'rb': '💎', 'php': '🐘', 'swift': '🍎', 'kt': '🟠',
+      // Web
+      'html': '🌐', 'htm': '🌐', 'css': '🎨', 'scss': '🎨', 'sass': '🎨', 'less': '🎨',
+      'vue': '💚', 'svelte': '🧡',
+      // 数据
+      'json': '📋', 'xml': '📋', 'yaml': '📋', 'yml': '📋', 'toml': '📋',
+      'csv': '📊', 'sql': '🗃️',
+      // 文档
+      'md': '📝', 'txt': '📄', 'pdf': '📕', 'doc': '📘', 'docx': '📘',
+      'xls': '📗', 'xlsx': '📗', 'ppt': '📙', 'pptx': '📙',
+      // 图片
+      'png': '🖼️', 'jpg': '🖼️', 'jpeg': '🖼️', 'gif': '🖼️', 'svg': '🎨', 'ico': '🖼️', 'webp': '🖼️',
+      // 配置
+      'env': '⚙️', 'gitignore': '📋', 'dockerignore': '🐳',
+      'dockerfile': '🐳', 'lock': '🔒',
+      // 压缩
+      'zip': '📦', 'rar': '📦', 'tar': '📦', 'gz': '📦', '7z': '📦',
+      // 可执行
+      'exe': '⚡', 'sh': '💻', 'bat': '💻', 'ps1': '💻',
+    };
+    return iconMap[ext] || '📄';
+  };
+
+  // 文件排序：文件夹在前，然后按名称排序
+  const sortFiles = <T extends { name: string; isDir?: boolean; isDirectory?: boolean }>(files: T[]): T[] => {
+    return [...files].sort((a, b) => {
+      const aIsDir = a.isDir ?? a.isDirectory ?? false;
+      const bIsDir = b.isDir ?? b.isDirectory ?? false;
+      // 文件夹优先
+      if (aIsDir && !bIsDir) return -1;
+      if (!aIsDir && bIsDir) return 1;
+      // 同类型按名称排序（忽略大小写）
+      return a.name.localeCompare(b.name, 'zh-CN', { sensitivity: 'base' });
+    });
   };
 
   const showNotification = (msg: string) => {
@@ -1279,6 +1699,19 @@ function App() {
     // 清理工具块前后的空行
     html = html.replace(/\n*(<details class="tb)/g, '$1');
     html = html.replace(/(<\/details>)\n*/g, '$1');
+    // 清理列表项之间的换行（避免多余空格）
+    html = html.replace(/<\/li>\n<li/g, '</li><li');
+    html = html.replace(/<\/ul>\n/g, '</ul>');
+    html = html.replace(/<\/ol>\n/g, '</ol>');
+    html = html.replace(/\n<ul>/g, '<ul>');
+    html = html.replace(/\n<ol>/g, '<ol>');
+    // 清理标题后的多余换行
+    html = html.replace(/<\/h[234]>\n+/g, '</h$&>'.replace('$&', ''));
+    html = html.replace(/<\/h2>\n+/g, '</h2>');
+    html = html.replace(/<\/h3>\n+/g, '</h3>');
+    html = html.replace(/<\/h4>\n+/g, '</h4>');
+    // 合并多个连续换行为单个
+    html = html.replace(/\n{2,}/g, '\n\n');
     // 换行
     html = html.replace(/\n/g, '<br>');
     
@@ -1372,6 +1805,68 @@ function App() {
           </div>
         );
       }
+    }
+
+    // 特殊处理：StrReplace/Edit 显示差异
+    if ((tool === 'StrReplace' || tool === 'Edit') && input?.old_string && input?.new_string) {
+      const oldStr = String(input.old_string || '');
+      const newStr = String(input.new_string || '');
+      const oldPreview = oldStr.length > 300 ? oldStr.substring(0, 300) + '\n...' : oldStr;
+      const newPreview = newStr.length > 300 ? newStr.substring(0, 300) + '\n...' : newStr;
+      return (
+        <div className="tool-card-cursor-expanded">
+          <div className="tool-card-cursor success">
+            <span className="tool-card-icon">{icon}</span>
+            <div className="tool-card-content">
+              <span className="tool-card-desc">{desc}</span>
+              <span className="tool-card-details">{details}</span>
+            </div>
+            <span className="tool-card-status-icon success">✓</span>
+          </div>
+          <div className="diff-view">
+            <div className="diff-section removed">
+              <div className="diff-header">
+                <span className="diff-label">− 删除</span>
+              </div>
+              <pre className="diff-content">{oldPreview}</pre>
+            </div>
+            <div className="diff-section added">
+              <div className="diff-header">
+                <span className="diff-label">+ 新增</span>
+              </div>
+              <pre className="diff-content">{newPreview}</pre>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // 特殊处理：Write 显示写入内容预览
+    if (tool === 'Write' && input?.contents) {
+      const contents = String(input.contents || '');
+      const preview = contents.length > 500 
+        ? contents.substring(0, 500) + '\n... (内容过长，已截断)'
+        : contents;
+      return (
+        <div className="tool-card-cursor-expanded">
+          <div className="tool-card-cursor success">
+            <span className="tool-card-icon">{icon}</span>
+            <div className="tool-card-content">
+              <span className="tool-card-desc">{desc}</span>
+              <span className="tool-card-details">{details}</span>
+            </div>
+            <span className="tool-card-status-icon success">✓</span>
+          </div>
+          <div className="diff-view">
+            <div className="diff-section added">
+              <div className="diff-header">
+                <span className="diff-label">📄 写入内容</span>
+              </div>
+              <pre className="diff-content">{preview}</pre>
+            </div>
+          </div>
+        </div>
+      );
     }
 
     // 统一的 Cursor 风格卡片
@@ -1471,6 +1966,315 @@ function App() {
                   />
                   <span>不再询问</span>
                 </label>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 计划审核弹窗 */}
+      {activePlan && activePlan.status === 'pending' && (
+        <div className="modal-overlay plan-overlay">
+          <div className="modal plan-modal">
+            <div className="modal-header plan-header">
+              <h3>📋 计划审核</h3>
+              <span className="plan-title">{activePlan.title}</span>
+            </div>
+            <div className="modal-body plan-body">
+              <div className="plan-summary">
+                <span className="plan-count">共 {activePlan.steps.length} 个步骤</span>
+              </div>
+              <div className="plan-steps">
+                {activePlan.steps.map((step: any, idx: number) => (
+                  <div key={idx} className={`plan-step ${step.status || 'pending'}`}>
+                    <span className="step-number">{idx + 1}</span>
+                    <div className="step-content">
+                      <span className="step-name">{step.name || `步骤 ${idx + 1}`}</span>
+                      <span className="step-desc">{step.description || step.action || '待执行'}</span>
+                      {step.tool && (
+                        <span className="step-tool">
+                          🔧 {step.tool}
+                          {step.params && <code>{JSON.stringify(step.params).substring(0, 50)}...</code>}
+                        </span>
+                      )}
+                    </div>
+                    <span className="step-status">
+                      {step.status === 'completed' ? '✅' : step.status === 'in_progress' ? '⏳' : '○'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="plan-actions">
+                <button className="plan-btn cancel" onClick={handlePlanCancel}>
+                  ❌ 取消
+                </button>
+                <button className="plan-btn approve" onClick={handlePlanApprove}>
+                  ✅ 批准执行
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* 计划执行中状态 - 可点击展开 */}
+      {activePlan && (activePlan.status === 'executing' || activePlan.status === 'approved') && (
+        <div 
+          className={`plan-progress-bar ${showPlanDetail ? 'expanded' : ''}`}
+          onClick={() => setShowPlanDetail(!showPlanDetail)}
+        >
+          <div className="progress-header">
+            <div className="progress-info">
+              <span className="progress-title">⚡ {activePlan.title}</span>
+              <span className="progress-step">
+                步骤 {activePlan.currentStep + 1}/{activePlan.steps.length}
+                {activePlan.steps[activePlan.currentStep] && (
+                  <span className="current-step-name">
+                    : {(activePlan.steps[activePlan.currentStep] as any).name || '执行中...'}
+                  </span>
+                )}
+              </span>
+            </div>
+            <span className="progress-toggle">{showPlanDetail ? '▼' : '▶'}</span>
+          </div>
+          <div className="progress-track">
+            <div 
+              className="progress-fill" 
+              style={{ width: `${((activePlan.currentStep + 1) / activePlan.steps.length) * 100}%` }}
+            />
+          </div>
+          
+          {/* 展开的详情 */}
+          {showPlanDetail && (
+            <div className="progress-detail" onClick={e => e.stopPropagation()}>
+              <div className="detail-steps">
+                {activePlan.steps.map((step: any, idx: number) => (
+                  <div 
+                    key={idx} 
+                    className={`detail-step ${
+                      idx < activePlan.currentStep ? 'completed' : 
+                      idx === activePlan.currentStep ? 'current' : 'pending'
+                    }`}
+                  >
+                    <span className="detail-icon">
+                      {idx < activePlan.currentStep ? '✅' : 
+                       idx === activePlan.currentStep ? '⏳' : '○'}
+                    </span>
+                    <div className="detail-content">
+                      <span className="detail-name">{step.name || `步骤 ${idx + 1}`}</span>
+                      <span className="detail-desc">{step.description || ''}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <button className="cancel-plan-btn" onClick={(e) => { e.stopPropagation(); handlePlanCancel(); }}>
+                取消计划
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      
+      {/* 用户提问弹窗 */}
+      {userQuestion && (
+        <div className="modal-overlay question-overlay">
+          <div className="modal question-modal">
+            <div className="modal-header">
+              <h3>❓ AI 需要您的输入</h3>
+            </div>
+            <div className="modal-body">
+              <p className="question-text">{userQuestion.question}</p>
+              
+              {userQuestion.type === 'confirm' ? (
+                <div className="question-actions">
+                  <button className="question-btn no" onClick={() => handleUserAnswer(false)}>
+                    否
+                  </button>
+                  <button className="question-btn yes" onClick={() => handleUserAnswer(true)}>
+                    是
+                  </button>
+                </div>
+              ) : userQuestion.type === 'choice' && userQuestion.options ? (
+                <div className="question-options">
+                  {userQuestion.options.map((opt, idx) => (
+                    <button 
+                      key={idx} 
+                      className="question-option"
+                      onClick={() => handleUserAnswer(opt)}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="question-input">
+                  <input 
+                    type="text" 
+                    placeholder={userQuestion.defaultValue || '请输入...'} 
+                    defaultValue={userQuestion.defaultValue}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        handleUserAnswer((e.target as HTMLInputElement).value);
+                      }
+                    }}
+                  />
+                  <button 
+                    className="question-submit"
+                    onClick={(e) => {
+                      const input = (e.target as HTMLElement).previousElementSibling as HTMLInputElement;
+                      handleUserAnswer(input.value);
+                    }}
+                  >
+                    提交
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* 技能面板 */}
+      {showSkillsPanel && (
+        <div className="modal-overlay" onClick={() => { setShowSkillsPanel(false); setShowCreateSkill(false); }}>
+          <div className="modal skills-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>🎯 技能库</h3>
+              <div className="header-actions">
+                {!showCreateSkill && (
+                  <button 
+                    className="create-skill-btn" 
+                    onClick={() => setShowCreateSkill(true)}
+                    title="创建自定义技能"
+                  >
+                    + 新建
+                  </button>
+                )}
+                <button className="close-btn" onClick={() => { setShowSkillsPanel(false); setShowCreateSkill(false); }}>×</button>
+              </div>
+            </div>
+            <div className="modal-body">
+              {/* 创建技能表单 */}
+              {showCreateSkill && (
+                <div className="create-skill-form">
+                  <h4>✨ 创建自定义技能</h4>
+                  <div className="form-group">
+                    <label>技能名称</label>
+                    <input 
+                      type="text" 
+                      placeholder="例如：部署到服务器" 
+                      value={newSkill.name}
+                      onChange={e => setNewSkill({...newSkill, name: e.target.value})}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>描述</label>
+                    <input 
+                      type="text" 
+                      placeholder="简短描述这个技能的作用" 
+                      value={newSkill.description}
+                      onChange={e => setNewSkill({...newSkill, description: e.target.value})}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>步骤（每行一个）</label>
+                    <textarea 
+                      placeholder="连接到服务器&#10;拉取最新代码&#10;安装依赖&#10;重启服务" 
+                      value={newSkill.steps}
+                      onChange={e => setNewSkill({...newSkill, steps: e.target.value})}
+                      rows={4}
+                    />
+                  </div>
+                  <div className="form-actions">
+                    <button className="cancel-btn" onClick={() => setShowCreateSkill(false)}>取消</button>
+                    <button className="submit-btn" onClick={createCustomSkill}>创建技能</button>
+                  </div>
+                </div>
+              )}
+              
+              {/* 技能列表 */}
+              <div className="skills-list">
+                {/* 自定义技能 */}
+                {skills.filter(s => !s.builtin).length > 0 && (
+                  <div className="skill-section">
+                    <div className="section-title">📦 我的技能</div>
+                    {skills.filter(s => !s.builtin).map(skill => (
+                      <div key={skill.id} className="skill-item custom" onClick={() => executeSkill(skill.id)}>
+                        <div className="skill-icon">🎨</div>
+                        <div className="skill-info">
+                          <span className="skill-name">{skill.name}</span>
+                          <span className="skill-desc">{skill.description}</span>
+                        </div>
+                        <button 
+                          className="delete-skill-btn" 
+                          onClick={(e) => deleteSkill(skill.id, e)}
+                          title="删除技能"
+                        >
+                          🗑️
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                
+                {/* 内置技能 */}
+                <div className="skill-section">
+                  <div className="section-title">⚡ 内置技能</div>
+                  {skills.filter(s => s.builtin).map(skill => (
+                    <div key={skill.id} className="skill-item" onClick={() => executeSkill(skill.id)}>
+                      <div className="skill-icon">
+                        {skill.category === 'react' ? '⚛️' : 
+                         skill.category === 'tooling' ? '🔧' : 
+                         skill.category === 'backend' ? '🖥️' : '📦'}
+                      </div>
+                      <div className="skill-info">
+                        <span className="skill-name">{skill.name}</span>
+                        <span className="skill-desc">{skill.description}</span>
+                      </div>
+                      <span className="skill-badge">内置</span>
+                    </div>
+                  ))}
+                </div>
+                
+                {skills.length === 0 && (
+                  <div className="empty-hint">
+                    暂无技能，点击上方"+ 新建"创建自定义技能
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* 任务面板 */}
+      {showTodosPanel && (
+        <div className="modal-overlay" onClick={() => setShowTodosPanel(false)}>
+          <div className="modal todos-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>📋 任务列表</h3>
+              <button className="close-btn" onClick={() => setShowTodosPanel(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div className="todos-list">
+                {todos.map(todo => (
+                  <div key={todo.id} className={`todo-item ${todo.status}`}>
+                    <span className={`todo-priority ${todo.priority}`}>
+                      {todo.priority === 'urgent' ? '🔴' : 
+                       todo.priority === 'high' ? '🟠' : 
+                       todo.priority === 'normal' ? '🟡' : '🟢'}
+                    </span>
+                    <span className="todo-content">{todo.content}</span>
+                    <span className={`todo-status ${todo.status}`}>
+                      {todo.status === 'completed' ? '✅' : 
+                       todo.status === 'in_progress' ? '⏳' : 
+                       todo.status === 'cancelled' ? '❌' : '○'}
+                    </span>
+                  </div>
+                ))}
+                {todos.length === 0 && (
+                  <div className="empty-hint">暂无任务</div>
+                )}
               </div>
             </div>
           </div>
@@ -1834,64 +2638,164 @@ function App() {
 
       {/* 侧边栏 */}
       <div className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
+        {/* 侧边栏头部 */}
         <div className="sidebar-header">
-          <span>{isRemoteMode ? '🌐 远程文件' : '📁 文件'}</span>
-          <button onClick={() => setSidebarOpen(false)}>×</button>
+          <div className="sidebar-title">
+            <span className="sidebar-logo">✨</span>
+            <span>Sparks</span>
+          </div>
+          <button className="sidebar-close" onClick={() => setSidebarOpen(false)}>×</button>
         </div>
         
-        {isRemoteMode ? (
-          <>
-            {/* 远程模式 */}
-            <div className="cwd remote-cwd">
-              <span className="remote-badge">SSH</span>
-              <span className="remote-path" title={remoteCwd}>
-                {remoteCwd.length > 20 ? '...' + remoteCwd.slice(-20) : remoteCwd}
-              </span>
+        {/* 会话列表区域 */}
+        <div className="sidebar-section sessions-section">
+          <div className="section-header">
+            <div className="section-title">
+              <span className="section-icon">💬</span>
+              <span>会话</span>
+              <span className="section-badge">{sessions.length}</span>
             </div>
-            <div className="file-list">
-              {/* 返回上级目录 */}
-              {remoteCwd !== '/' && (
-                <div 
-                  className="file-item dir parent-dir"
-                  onClick={navigateRemoteUp}
-                >
-                  📁 ..
+            <button className="section-action-btn" onClick={createNewSession} title="新建会话">
+              <span>+</span>
+            </button>
+          </div>
+          <div className="sessions-list">
+            {sessions.map(session => (
+              <div 
+                key={session.id}
+                className={`session-item ${session.id === currentSessionId ? 'active' : ''}`}
+                onClick={() => switchSession(session.id)}
+              >
+                <div className="session-icon">
+                  {session.id === currentSessionId ? '💬' : '📝'}
                 </div>
+                <div className="session-info">
+                  <span className="session-title" title={session.title}>
+                    {session.title}
+                  </span>
+                  <span className="session-meta">
+                    {session.messages.length} 条消息 · {new Date(session.updatedAt).toLocaleDateString()}
+                  </span>
+                </div>
+                <button 
+                  className="delete-session-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (sessions.length > 1 || session.messages.length === 0) {
+                      deleteSession(session.id);
+                    } else {
+                      clearCurrentSession();
+                    }
+                  }}
+                  title="删除会话"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            {sessions.length === 0 && (
+              <div className="empty-hint">暂无会话</div>
+            )}
+          </div>
+        </div>
+        
+        {/* 文件浏览区域 */}
+        <div className="sidebar-section files-section">
+          <div className="section-header">
+            <div className="section-title">
+              <span className="section-icon">{isRemoteMode ? '🌐' : '📁'}</span>
+              <span>{isRemoteMode ? '远程文件' : '文件'}</span>
+            </div>
+            <div className="section-actions">
+              {!isRemoteMode && (
+                <button 
+                  className="section-action-btn" 
+                  onClick={selectDirectory} 
+                  title="选择目录"
+                >
+                  📂
+                </button>
               )}
-              {remoteFiles.map((file, i) => (
-                <div 
-                  key={i} 
-                  className={`file-item ${file.isDirectory ? 'dir' : ''}`}
-                  onClick={() => navigateRemote(file)}
-                  title={`${file.name} (${formatFileSize(file.size)})`}
-                >
-                  {file.isDirectory ? '📁' : '📄'} {file.name}
-                </div>
-              ))}
-              {remoteFiles.length === 0 && (
-                <div className="empty-hint">目录为空</div>
-              )}
+              <button 
+                className="section-action-btn" 
+                onClick={() => isRemoteMode ? loadRemoteFiles(remoteCwd) : loadCwd()} 
+                title="刷新"
+              >
+                🔄
+              </button>
             </div>
-          </>
-        ) : (
-          <>
-            {/* 本地模式 */}
-            <div className="cwd" onClick={selectDirectory}>
-              {cwd ? cwd.split('\\').pop() : '选择目录...'}
-            </div>
-            <div className="file-list">
-              {files.map((file, i) => (
-                <div 
-                  key={i} 
-                  className={`file-item ${file.isDir ? 'dir' : ''}`}
-                  onClick={() => !file.isDir && openFile(file.path)}
-                >
-                  {file.isDir ? '📁' : '📄'} {file.name}
-                </div>
-              ))}
-            </div>
-          </>
-        )}
+          </div>
+          
+          {/* 当前路径 */}
+          <div className="current-path" onClick={!isRemoteMode ? selectDirectory : undefined}>
+            {isRemoteMode ? (
+              <>
+                <span className="path-badge">SSH</span>
+                <span className="path-text" title={remoteCwd}>
+                  {remoteCwd.length > 25 ? '...' + remoteCwd.slice(-25) : remoteCwd}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="path-icon">📍</span>
+                <span className="path-text" title={cwd}>
+                  {cwd ? (cwd.length > 25 ? '...' + cwd.slice(-25) : cwd) : '点击选择目录...'}
+                </span>
+              </>
+            )}
+          </div>
+          
+          {/* 文件列表 */}
+          <div className="file-list">
+            {isRemoteMode ? (
+              <>
+                {remoteCwd !== '/' && (
+                  <div className="file-item dir parent-dir" onClick={navigateRemoteUp}>
+                    <span className="file-icon">📁</span>
+                    <span className="file-name">..</span>
+                  </div>
+                )}
+                {sortFiles(remoteFiles).map((file, i) => (
+                  <div 
+                    key={i} 
+                    className={`file-item ${file.isDirectory ? 'dir' : ''}`}
+                    onClick={() => navigateRemote(file)}
+                    title={`${file.name} (${formatFileSize(file.size)})`}
+                  >
+                    <span className="file-icon">{getFileIcon(file.name, file.isDirectory)}</span>
+                    <span className="file-name">{file.name}</span>
+                    {!file.isDirectory && <span className="file-size">{formatFileSize(file.size)}</span>}
+                  </div>
+                ))}
+                {remoteFiles.length === 0 && (
+                  <div className="empty-hint">📭 目录为空</div>
+                )}
+              </>
+            ) : (
+              <>
+                {sortFiles(files).map((file, i) => (
+                  <div 
+                    key={i} 
+                    className={`file-item ${file.isDir ? 'dir' : ''}`}
+                    onClick={() => !file.isDir && openFile(file.path)}
+                    title={file.path}
+                  >
+                    <span className="file-icon">{getFileIcon(file.name, file.isDir)}</span>
+                    <span className="file-name">{file.name}</span>
+                  </div>
+                ))}
+                {files.length === 0 && cwd && (
+                  <div className="empty-hint">📭 目录为空</div>
+                )}
+                {!cwd && (
+                  <div className="empty-hint select-hint" onClick={selectDirectory}>
+                    📂 点击选择工作目录
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* 主区域 */}
@@ -1929,13 +2833,11 @@ function App() {
                     return;
                   }
                   
-                  // 切换厂商，清空对话历史
+                  // 切换厂商，保留当前会话
                   setCurrentProvider(newProvider);
-                  setMessages([]);
-                  setToolResults([]);
-                  localStorage.removeItem('chat-history');
+                  // 清空后端历史以使用新厂商，但前端会话保留
                   await ipcRenderer.invoke('clear-history');
-                  showNotification(`${API_PROVIDERS[newProvider].icon} 已切换到 ${API_PROVIDERS[newProvider].name}`);
+                  showNotification(`${API_PROVIDERS[newProvider].icon} 已切换到 ${API_PROVIDERS[newProvider].name}，会话已保留`);
                 }}
               >
                 {(Object.keys(API_PROVIDERS) as ApiProvider[]).map(provider => (
@@ -1982,6 +2884,22 @@ function App() {
                 ⚙️
               </button>
             </div>
+            {/* 技能按钮 */}
+            <button 
+              className="skill-btn"
+              onClick={() => { loadSkills(); setShowSkillsPanel(true); }}
+              title="技能库"
+            >
+              🎯
+            </button>
+            {/* 任务按钮 */}
+            <button 
+              className="todo-btn"
+              onClick={() => { loadTodos(); setShowTodosPanel(true); }}
+              title="任务列表"
+            >
+              📋
+            </button>
             {/* SSH 远程连接按钮 */}
             <button 
               className={`ssh-btn ${isRemoteMode ? 'connected' : ''}`}
@@ -2011,13 +2929,12 @@ function App() {
             <button 
               className="clear-btn" 
               onClick={async () => { 
-                setMessages([]); 
+                clearCurrentSession();
                 setToolResults([]);
-                localStorage.removeItem('chat-history');
                 await ipcRenderer.invoke('clear-history');
-                showNotification('✅ 对话已清空');
+                showNotification('✅ 当前会话已清空');
               }}
-              title="清空历史"
+              title="清空当前会话"
             >
               🗑️
             </button>
@@ -2028,13 +2945,78 @@ function App() {
         <div className="chat" ref={chatRef}>
           {messages.length === 0 && !loading && (
             <div className="welcome">
-              <h1>✨ Sparks</h1>
-              <p>AI 编程助手，基于 Electron + React + cursor2api</p>
-              <div className="examples">
-                <div onClick={() => setInput('读取 package.json 看看项目信息')}>查看项目配置</div>
-                <div onClick={() => setInput('帮我分析 src/App.tsx 的代码结构')}>分析主组件</div>
-                <div onClick={() => setInput('执行 npm run build 打包项目')}>打包项目</div>
-                <div onClick={() => setInput('帮我优化 electron.js 的代码')}>优化后端代码</div>
+              <div className="welcome-header">
+                <h1>✨ Sparks</h1>
+                <p className="welcome-subtitle">你的 AI 编程助手</p>
+              </div>
+              
+              <div className="welcome-features">
+                <div className="feature-card">
+                  <span className="feature-icon">📁</span>
+                  <span className="feature-title">文件操作</span>
+                  <span className="feature-desc">读取、编辑、创建文件</span>
+                </div>
+                <div className="feature-card">
+                  <span className="feature-icon">⚡</span>
+                  <span className="feature-title">命令执行</span>
+                  <span className="feature-desc">运行 Shell 命令</span>
+                </div>
+                <div className="feature-card">
+                  <span className="feature-icon">🔍</span>
+                  <span className="feature-title">代码搜索</span>
+                  <span className="feature-desc">全局搜索代码内容</span>
+                </div>
+                <div className="feature-card">
+                  <span className="feature-icon">🌐</span>
+                  <span className="feature-title">网络请求</span>
+                  <span className="feature-desc">搜索和获取网页</span>
+                </div>
+              </div>
+              
+              <div className="welcome-section">
+                <h3>💡 快速开始</h3>
+                <div className="quick-actions">
+                  <div className="action-card" onClick={() => setInput('读取 package.json 看看项目信息')}>
+                    <span className="action-icon">📋</span>
+                    <span>查看项目配置</span>
+                  </div>
+                  <div className="action-card" onClick={() => setInput('帮我分析当前项目的代码结构')}>
+                    <span className="action-icon">🔬</span>
+                    <span>分析代码结构</span>
+                  </div>
+                  <div className="action-card" onClick={() => setInput('搜索所有 TODO 注释')}>
+                    <span className="action-icon">📝</span>
+                    <span>查找 TODO</span>
+                  </div>
+                  <div className="action-card" onClick={() => setInput('帮我检查代码中的潜在问题')}>
+                    <span className="action-icon">🐛</span>
+                    <span>检查问题</span>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="welcome-section">
+                <h3>🎯 技能快捷方式</h3>
+                <div className="skill-shortcuts">
+                  <div className="shortcut-btn" onClick={() => { loadSkills(); setShowSkillsPanel(true); }}>
+                    <span>🎯</span> 打开技能库
+                  </div>
+                  <div className="shortcut-btn" onClick={() => { loadTodos(); setShowTodosPanel(true); }}>
+                    <span>📋</span> 任务列表
+                  </div>
+                  <div className="shortcut-btn" onClick={() => setShowApiConfig(true)}>
+                    <span>⚙️</span> API 配置
+                  </div>
+                </div>
+              </div>
+              
+              <div className="welcome-footer">
+                <span className="provider-info">
+                  当前模型: {API_PROVIDERS[currentProvider]?.icon} {currentConfig.selectedModel}
+                </span>
+                <span className="mode-info">
+                  {permissionMode === 'auto' ? '⚡ 自动模式' : '🔒 安全模式'}
+                </span>
               </div>
             </div>
           )}

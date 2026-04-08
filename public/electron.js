@@ -2869,6 +2869,879 @@ const TOOLS = {
             };
         }
     },
+    
+    // ==================== 新增功能工具 ====================
+    
+    /**
+     * Plan 工具 - 计划模式，让 AI 在执行复杂任务前先制定计划
+     */
+    Plan: {
+        name: 'Plan',
+        description: '进入计划模式，在执行复杂任务前制定详细计划供用户审核',
+        isReadOnly: true,
+        async call({ action, plan_id, title, steps, step_index, status }, context) {
+            // 计划存储
+            if (!global._plans) global._plans = new Map();
+            const plans = global._plans;
+            
+            switch (action) {
+                case 'create': {
+                    const id = plan_id || `plan_${Date.now()}`;
+                    const plan = {
+                        id,
+                        title: title || '任务计划',
+                        steps: steps || [],
+                        status: 'pending', // pending, approved, executing, completed, cancelled
+                        currentStep: 0,
+                        createdAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                    };
+                    plans.set(id, plan);
+                    
+                    // 通知前端显示计划审核界面
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('plan-created', plan);
+                    }
+                    
+                    return {
+                        success: true,
+                        action: 'create',
+                        plan,
+                        message: '计划已创建，等待用户审核',
+                    };
+                }
+                
+                case 'approve': {
+                    const plan = plans.get(plan_id);
+                    if (!plan) return { success: false, error: `计划不存在: ${plan_id}` };
+                    
+                    plan.status = 'approved';
+                    plan.updatedAt = new Date().toISOString();
+                    plans.set(plan_id, plan);
+                    
+                    return { success: true, action: 'approve', plan };
+                }
+                
+                case 'execute_step': {
+                    const plan = plans.get(plan_id);
+                    if (!plan) return { success: false, error: `计划不存在: ${plan_id}` };
+                    if (plan.status !== 'approved' && plan.status !== 'executing') {
+                        return { success: false, error: '计划未批准，无法执行' };
+                    }
+                    
+                    const idx = step_index ?? plan.currentStep;
+                    if (idx >= plan.steps.length) {
+                        plan.status = 'completed';
+                        plan.updatedAt = new Date().toISOString();
+                        return { success: true, action: 'complete', plan };
+                    }
+                    
+                    plan.status = 'executing';
+                    plan.steps[idx].status = status || 'in_progress';
+                    plan.currentStep = idx;
+                    plan.updatedAt = new Date().toISOString();
+                    plans.set(plan_id, plan);
+                    
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('plan-updated', plan);
+                    }
+                    
+                    return { success: true, action: 'execute_step', plan, currentStep: idx };
+                }
+                
+                case 'complete_step': {
+                    const plan = plans.get(plan_id);
+                    if (!plan) return { success: false, error: `计划不存在: ${plan_id}` };
+                    
+                    const idx = step_index ?? plan.currentStep;
+                    if (idx < plan.steps.length) {
+                        plan.steps[idx].status = 'completed';
+                        plan.currentStep = idx + 1;
+                    }
+                    
+                    if (plan.currentStep >= plan.steps.length) {
+                        plan.status = 'completed';
+                    }
+                    
+                    plan.updatedAt = new Date().toISOString();
+                    plans.set(plan_id, plan);
+                    
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('plan-updated', plan);
+                    }
+                    
+                    return { success: true, action: 'complete_step', plan };
+                }
+                
+                case 'cancel': {
+                    const plan = plans.get(plan_id);
+                    if (!plan) return { success: false, error: `计划不存在: ${plan_id}` };
+                    
+                    plan.status = 'cancelled';
+                    plan.updatedAt = new Date().toISOString();
+                    plans.set(plan_id, plan);
+                    
+                    return { success: true, action: 'cancel', plan };
+                }
+                
+                case 'get': {
+                    const plan = plans.get(plan_id);
+                    if (!plan) return { success: false, error: `计划不存在: ${plan_id}` };
+                    return { success: true, action: 'get', plan };
+                }
+                
+                case 'list': {
+                    return {
+                        success: true,
+                        action: 'list',
+                        plans: Array.from(plans.values()),
+                        count: plans.size,
+                    };
+                }
+                
+                default:
+                    return { success: false, error: `未知操作: ${action}` };
+            }
+        },
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: { type: 'string', enum: ['create', 'approve', 'execute_step', 'complete_step', 'cancel', 'get', 'list'], description: '操作类型' },
+                plan_id: { type: 'string', description: '计划 ID' },
+                title: { type: 'string', description: '计划标题' },
+                steps: { 
+                    type: 'array', 
+                    items: { 
+                        type: 'object',
+                        properties: {
+                            name: { type: 'string', description: '步骤名称' },
+                            description: { type: 'string', description: '步骤描述' },
+                            tool: { type: 'string', description: '使用的工具' },
+                            params: { type: 'object', properties: {}, description: '工具参数' },
+                        },
+                    }, 
+                    description: '计划步骤列表' 
+                },
+                step_index: { type: 'number', description: '步骤索引' },
+                status: { type: 'string', description: '状态' },
+            },
+            required: ['action'],
+        },
+    },
+    
+    /**
+     * Todo 工具 - 增强版任务管理
+     */
+    Todo: {
+        name: 'Todo',
+        description: '管理任务列表，支持创建、更新、删除和查询任务',
+        isReadOnly: false,
+        async call({ action, id, content, status, priority, tags, merge }, context) {
+            if (!global._todos) global._todos = new Map();
+            const todos = global._todos;
+            
+            switch (action) {
+                case 'create': {
+                    const todoId = id || `todo_${Date.now()}`;
+                    const todo = {
+                        id: todoId,
+                        content: content || '',
+                        status: status || 'pending', // pending, in_progress, completed, cancelled
+                        priority: priority || 'normal', // low, normal, high, urgent
+                        tags: tags || [],
+                        createdAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                    };
+                    todos.set(todoId, todo);
+                    
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('todo-updated', { action: 'create', todo });
+                    }
+                    
+                    return { success: true, action: 'create', todo };
+                }
+                
+                case 'update': {
+                    const todo = todos.get(id);
+                    if (!todo) return { success: false, error: `任务不存在: ${id}` };
+                    
+                    if (content !== undefined) todo.content = content;
+                    if (status !== undefined) todo.status = status;
+                    if (priority !== undefined) todo.priority = priority;
+                    if (tags !== undefined) todo.tags = tags;
+                    todo.updatedAt = new Date().toISOString();
+                    
+                    todos.set(id, todo);
+                    
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('todo-updated', { action: 'update', todo });
+                    }
+                    
+                    return { success: true, action: 'update', todo };
+                }
+                
+                case 'delete': {
+                    if (!todos.has(id)) return { success: false, error: `任务不存在: ${id}` };
+                    
+                    todos.delete(id);
+                    
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('todo-updated', { action: 'delete', id });
+                    }
+                    
+                    return { success: true, action: 'delete', id };
+                }
+                
+                case 'get': {
+                    const todo = todos.get(id);
+                    if (!todo) return { success: false, error: `任务不存在: ${id}` };
+                    return { success: true, action: 'get', todo };
+                }
+                
+                case 'list': {
+                    const allTodos = Array.from(todos.values());
+                    const filtered = status 
+                        ? allTodos.filter(t => t.status === status)
+                        : allTodos;
+                    
+                    // 按优先级和时间排序
+                    const priorityOrder = { urgent: 0, high: 1, normal: 2, low: 3 };
+                    filtered.sort((a, b) => {
+                        const pDiff = (priorityOrder[a.priority] || 2) - (priorityOrder[b.priority] || 2);
+                        if (pDiff !== 0) return pDiff;
+                        return new Date(b.updatedAt) - new Date(a.updatedAt);
+                    });
+                    
+                    return {
+                        success: true,
+                        action: 'list',
+                        todos: filtered,
+                        count: filtered.length,
+                        summary: {
+                            pending: allTodos.filter(t => t.status === 'pending').length,
+                            in_progress: allTodos.filter(t => t.status === 'in_progress').length,
+                            completed: allTodos.filter(t => t.status === 'completed').length,
+                        },
+                    };
+                }
+                
+                case 'batch_update': {
+                    // 批量更新（用于合并）
+                    const results = [];
+                    const items = Array.isArray(content) ? content : [];
+                    
+                    for (const item of items) {
+                        if (!item.id) continue;
+                        
+                        let todo = todos.get(item.id);
+                        if (todo && merge) {
+                            // 合并模式：更新现有任务
+                            if (item.content !== undefined) todo.content = item.content;
+                            if (item.status !== undefined) todo.status = item.status;
+                            if (item.priority !== undefined) todo.priority = item.priority;
+                            todo.updatedAt = new Date().toISOString();
+                        } else if (!todo) {
+                            // 创建新任务
+                            todo = {
+                                id: item.id,
+                                content: item.content || '',
+                                status: item.status || 'pending',
+                                priority: item.priority || 'normal',
+                                tags: item.tags || [],
+                                createdAt: new Date().toISOString(),
+                                updatedAt: new Date().toISOString(),
+                            };
+                        }
+                        todos.set(item.id, todo);
+                        results.push(todo);
+                    }
+                    
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('todo-updated', { action: 'batch_update', todos: results });
+                    }
+                    
+                    return { success: true, action: 'batch_update', todos: results, count: results.length };
+                }
+                
+                default:
+                    return { success: false, error: `未知操作: ${action}` };
+            }
+        },
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: { type: 'string', enum: ['create', 'update', 'delete', 'get', 'list', 'batch_update'] },
+                id: { type: 'string' },
+                content: { type: 'string' },
+                status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'cancelled'] },
+                priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
+                tags: { type: 'array', items: { type: 'string' } },
+                merge: { type: 'boolean' },
+            },
+            required: ['action'],
+        },
+    },
+    
+    /**
+     * AskUser 工具 - AI 主动向用户提问
+     */
+    AskUser: {
+        name: 'AskUser',
+        description: 'AI 在不确定时向用户提问，支持多种问题类型',
+        isReadOnly: true,
+        async call({ question, options, type, default_value, timeout }, context) {
+            return new Promise((resolve) => {
+                const questionId = `q_${Date.now()}`;
+                
+                // 存储问题回调
+                if (!global._pendingQuestions) global._pendingQuestions = new Map();
+                
+                const timeoutMs = (timeout || 300) * 1000; // 默认 5 分钟超时
+                const timeoutId = setTimeout(() => {
+                    global._pendingQuestions.delete(questionId);
+                    resolve({
+                        success: false,
+                        answered: false,
+                        error: '问题超时未回答',
+                        questionId,
+                    });
+                }, timeoutMs);
+                
+                global._pendingQuestions.set(questionId, {
+                    resolve: (answer) => {
+                        clearTimeout(timeoutId);
+                        global._pendingQuestions.delete(questionId);
+                        resolve({
+                            success: true,
+                            answered: true,
+                            answer,
+                            questionId,
+                        });
+                    },
+                    question,
+                    options,
+                    type,
+                });
+                
+                // 通知前端显示问题
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('ask-user', {
+                        questionId,
+                        question,
+                        options,
+                        type: type || 'text', // text, choice, confirm, multiselect
+                        defaultValue: default_value,
+                    });
+                }
+            });
+        },
+        inputSchema: {
+            type: 'object',
+            properties: {
+                question: { type: 'string', description: '要问用户的问题' },
+                options: { type: 'array', items: { type: 'string' }, description: '选项列表（用于 choice/multiselect 类型）' },
+                type: { type: 'string', enum: ['text', 'choice', 'confirm', 'multiselect'], description: '问题类型' },
+                default_value: { type: 'string', description: '默认值' },
+                timeout: { type: 'number', description: '超时时间（秒）' },
+            },
+            required: ['question'],
+        },
+    },
+    
+    /**
+     * Skill 工具 - 技能系统，可复用的任务模板
+     */
+    Skill: {
+        name: 'Skill',
+        description: '管理和执行可复用的技能模板',
+        isReadOnly: false,
+        _skills: new Map([
+            // 内置技能
+            ['create-react-component', {
+                id: 'create-react-component',
+                name: '创建 React 组件',
+                description: '创建一个新的 React 函数组件，包含 TypeScript 类型和 CSS 模块',
+                category: 'react',
+                builtin: true,
+                steps: [
+                    { action: 'input', name: 'componentName', prompt: '组件名称' },
+                    { action: 'input', name: 'directory', prompt: '目录路径', default: 'src/components' },
+                    { action: 'create_file', template: 'react-component' },
+                    { action: 'create_file', template: 'react-component-css' },
+                ],
+            }],
+            ['setup-eslint', {
+                id: 'setup-eslint',
+                name: '配置 ESLint',
+                description: '为项目配置 ESLint 和 Prettier',
+                category: 'tooling',
+                builtin: true,
+                steps: [
+                    { action: 'bash', command: 'npm install -D eslint prettier eslint-config-prettier' },
+                    { action: 'create_file', template: 'eslintrc' },
+                    { action: 'create_file', template: 'prettierrc' },
+                ],
+            }],
+            ['create-api-endpoint', {
+                id: 'create-api-endpoint',
+                name: '创建 API 端点',
+                description: '创建一个 RESTful API 端点',
+                category: 'backend',
+                builtin: true,
+                steps: [
+                    { action: 'input', name: 'endpointName', prompt: '端点名称' },
+                    { action: 'input', name: 'method', prompt: 'HTTP 方法', options: ['GET', 'POST', 'PUT', 'DELETE'] },
+                    { action: 'create_file', template: 'api-endpoint' },
+                ],
+            }],
+        ]),
+        
+        async call({ action, skill_id, name, description, steps, params }, context) {
+            const skills = this._skills;
+            
+            switch (action) {
+                case 'list': {
+                    const allSkills = Array.from(skills.values());
+                    const byCategory = {};
+                    
+                    for (const skill of allSkills) {
+                        const cat = skill.category || 'other';
+                        if (!byCategory[cat]) byCategory[cat] = [];
+                        byCategory[cat].push({
+                            id: skill.id,
+                            name: skill.name,
+                            description: skill.description,
+                            builtin: skill.builtin || false,
+                        });
+                    }
+                    
+                    return {
+                        success: true,
+                        action: 'list',
+                        skills: allSkills.map(s => ({
+                            id: s.id,
+                            name: s.name,
+                            description: s.description,
+                            category: s.category,
+                            builtin: s.builtin,
+                        })),
+                        byCategory,
+                        count: allSkills.length,
+                    };
+                }
+                
+                case 'get': {
+                    const skill = skills.get(skill_id);
+                    if (!skill) return { success: false, error: `技能不存在: ${skill_id}` };
+                    return { success: true, action: 'get', skill };
+                }
+                
+                case 'create': {
+                    const id = skill_id || name?.toLowerCase().replace(/\s+/g, '-') || `skill_${Date.now()}`;
+                    const skill = {
+                        id,
+                        name: name || id,
+                        description: description || '',
+                        steps: steps || [],
+                        category: 'custom',
+                        builtin: false,
+                        createdAt: new Date().toISOString(),
+                    };
+                    skills.set(id, skill);
+                    
+                    return { success: true, action: 'create', skill };
+                }
+                
+                case 'execute': {
+                    const skill = skills.get(skill_id);
+                    if (!skill) return { success: false, error: `技能不存在: ${skill_id}` };
+                    
+                    // 返回技能执行指令（由 AI 实际执行步骤）
+                    return {
+                        success: true,
+                        action: 'execute',
+                        skill,
+                        params: params || {},
+                        instructions: `请按照以下步骤执行技能 "${skill.name}":\n` +
+                            skill.steps.map((s, i) => `${i + 1}. ${JSON.stringify(s)}`).join('\n'),
+                    };
+                }
+                
+                case 'delete': {
+                    const skill = skills.get(skill_id);
+                    if (!skill) return { success: false, error: `技能不存在: ${skill_id}` };
+                    if (skill.builtin) return { success: false, error: '无法删除内置技能' };
+                    
+                    skills.delete(skill_id);
+                    return { success: true, action: 'delete', skill_id };
+                }
+                
+                default:
+                    return { success: false, error: `未知操作: ${action}` };
+            }
+        },
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: { type: 'string', enum: ['list', 'get', 'create', 'execute', 'delete'], description: '操作类型' },
+                skill_id: { type: 'string', description: '技能ID' },
+                name: { type: 'string', description: '技能名称' },
+                description: { type: 'string', description: '技能描述' },
+                steps: { type: 'array', items: { type: 'object', properties: {} }, description: '技能步骤' },
+                params: { type: 'object', properties: {}, description: '执行参数' },
+            },
+            required: ['action'],
+        },
+    },
+    
+    /**
+     * NotebookEdit 工具 - Jupyter Notebook 编辑
+     */
+    NotebookEdit: {
+        name: 'NotebookEdit',
+        description: '编辑 Jupyter Notebook 文件',
+        isReadOnly: false,
+        async call({ notebook_path, action, cell_index, cell_type, content, old_content, insert_after }, context) {
+            const fullPath = path.isAbsolute(notebook_path) 
+                ? notebook_path 
+                : path.join(workingDirectory, notebook_path);
+            
+            // 读取或创建 notebook
+            let notebook;
+            if (fs.existsSync(fullPath)) {
+                const data = fs.readFileSync(fullPath, 'utf8');
+                notebook = JSON.parse(data);
+            } else if (action === 'create') {
+                notebook = {
+                    cells: [],
+                    metadata: {
+                        kernelspec: {
+                            display_name: 'Python 3',
+                            language: 'python',
+                            name: 'python3',
+                        },
+                        language_info: {
+                            name: 'python',
+                            version: '3.9.0',
+                        },
+                    },
+                    nbformat: 4,
+                    nbformat_minor: 4,
+                };
+            } else {
+                throw new Error(`Notebook 不存在: ${notebook_path}`);
+            }
+            
+            const createCell = (type, source) => ({
+                cell_type: type || 'code',
+                source: Array.isArray(source) ? source : (source || '').split('\n'),
+                metadata: {},
+                ...(type === 'code' ? { execution_count: null, outputs: [] } : {}),
+            });
+            
+            switch (action) {
+                case 'create': {
+                    // 创建新 notebook
+                    const dir = path.dirname(fullPath);
+                    if (!fs.existsSync(dir)) {
+                        fs.mkdirSync(dir, { recursive: true });
+                    }
+                    fs.writeFileSync(fullPath, JSON.stringify(notebook, null, 2));
+                    return { success: true, action: 'create', path: fullPath };
+                }
+                
+                case 'add_cell': {
+                    const cell = createCell(cell_type, content);
+                    const idx = insert_after !== undefined 
+                        ? Math.min(insert_after + 1, notebook.cells.length)
+                        : notebook.cells.length;
+                    notebook.cells.splice(idx, 0, cell);
+                    fs.writeFileSync(fullPath, JSON.stringify(notebook, null, 2));
+                    return { success: true, action: 'add_cell', cell_index: idx, cell };
+                }
+                
+                case 'edit_cell': {
+                    if (cell_index === undefined || cell_index < 0 || cell_index >= notebook.cells.length) {
+                        throw new Error(`无效的 cell_index: ${cell_index}`);
+                    }
+                    
+                    const cell = notebook.cells[cell_index];
+                    const currentSource = Array.isArray(cell.source) ? cell.source.join('') : cell.source;
+                    
+                    // 如果提供了 old_content，进行替换
+                    if (old_content !== undefined) {
+                        if (!currentSource.includes(old_content)) {
+                            throw new Error('old_content 不匹配当前单元格内容');
+                        }
+                        cell.source = currentSource.replace(old_content, content).split('\n').map((l, i, a) => 
+                            i < a.length - 1 ? l + '\n' : l
+                        );
+                    } else {
+                        cell.source = content.split('\n').map((l, i, a) => 
+                            i < a.length - 1 ? l + '\n' : l
+                        );
+                    }
+                    
+                    if (cell_type) cell.cell_type = cell_type;
+                    
+                    fs.writeFileSync(fullPath, JSON.stringify(notebook, null, 2));
+                    return { success: true, action: 'edit_cell', cell_index, cell };
+                }
+                
+                case 'delete_cell': {
+                    if (cell_index === undefined || cell_index < 0 || cell_index >= notebook.cells.length) {
+                        throw new Error(`无效的 cell_index: ${cell_index}`);
+                    }
+                    
+                    const removed = notebook.cells.splice(cell_index, 1);
+                    fs.writeFileSync(fullPath, JSON.stringify(notebook, null, 2));
+                    return { success: true, action: 'delete_cell', cell_index, removed: removed[0] };
+                }
+                
+                case 'get_cell': {
+                    if (cell_index === undefined || cell_index < 0 || cell_index >= notebook.cells.length) {
+                        throw new Error(`无效的 cell_index: ${cell_index}`);
+                    }
+                    return { success: true, action: 'get_cell', cell: notebook.cells[cell_index] };
+                }
+                
+                case 'list_cells': {
+                    return {
+                        success: true,
+                        action: 'list_cells',
+                        cells: notebook.cells.map((c, i) => ({
+                            index: i,
+                            type: c.cell_type,
+                            preview: (Array.isArray(c.source) ? c.source.join('') : c.source).substring(0, 100),
+                        })),
+                        count: notebook.cells.length,
+                    };
+                }
+                
+                default:
+                    return { success: false, error: `未知操作: ${action}` };
+            }
+        },
+        inputSchema: {
+            type: 'object',
+            properties: {
+                notebook_path: { type: 'string', description: 'Notebook 文件路径' },
+                action: { type: 'string', enum: ['create', 'add_cell', 'edit_cell', 'delete_cell', 'get_cell', 'list_cells'] },
+                cell_index: { type: 'number', description: '单元格索引' },
+                cell_type: { type: 'string', enum: ['code', 'markdown', 'raw'] },
+                content: { type: 'string', description: '单元格内容' },
+                old_content: { type: 'string', description: '要替换的旧内容' },
+                insert_after: { type: 'number', description: '在此索引后插入' },
+            },
+            required: ['notebook_path', 'action'],
+        },
+    },
+    
+    /**
+     * Permission 工具 - 权限控制
+     */
+    Permission: {
+        name: 'Permission',
+        description: '管理工具权限和安全设置',
+        isReadOnly: false,
+        _rules: new Map(),
+        _mode: 'default', // default, strict, permissive
+        
+        async call({ action, tool_name, rule, mode }, context) {
+            const rules = this._rules;
+            
+            switch (action) {
+                case 'set_mode': {
+                    if (!['default', 'strict', 'permissive'].includes(mode)) {
+                        return { success: false, error: `无效的模式: ${mode}` };
+                    }
+                    this._mode = mode;
+                    
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('permission-mode-changed', mode);
+                    }
+                    
+                    return { success: true, action: 'set_mode', mode };
+                }
+                
+                case 'get_mode': {
+                    return { success: true, action: 'get_mode', mode: this._mode };
+                }
+                
+                case 'add_rule': {
+                    if (!tool_name || !rule) {
+                        return { success: false, error: '需要 tool_name 和 rule' };
+                    }
+                    
+                    const ruleObj = {
+                        tool: tool_name,
+                        action: rule.action || 'ask', // allow, deny, ask
+                        pattern: rule.pattern, // 路径/命令模式
+                        reason: rule.reason,
+                        createdAt: new Date().toISOString(),
+                    };
+                    
+                    if (!rules.has(tool_name)) rules.set(tool_name, []);
+                    rules.get(tool_name).push(ruleObj);
+                    
+                    return { success: true, action: 'add_rule', rule: ruleObj };
+                }
+                
+                case 'remove_rule': {
+                    if (!tool_name) return { success: false, error: '需要 tool_name' };
+                    
+                    rules.delete(tool_name);
+                    return { success: true, action: 'remove_rule', tool_name };
+                }
+                
+                case 'check': {
+                    if (!tool_name) return { success: false, error: '需要 tool_name' };
+                    
+                    const toolRules = rules.get(tool_name) || [];
+                    const tool = TOOLS[tool_name];
+                    const isReadOnly = tool?.isReadOnly || false;
+                    
+                    // 检查模式
+                    let defaultAction = 'allow';
+                    if (this._mode === 'strict' && !isReadOnly) {
+                        defaultAction = 'ask';
+                    } else if (this._mode === 'permissive') {
+                        defaultAction = 'allow';
+                    }
+                    
+                    return {
+                        success: true,
+                        action: 'check',
+                        tool_name,
+                        mode: this._mode,
+                        rules: toolRules,
+                        defaultAction,
+                        isReadOnly,
+                    };
+                }
+                
+                case 'list_rules': {
+                    const allRules = [];
+                    for (const [tool, toolRules] of rules.entries()) {
+                        for (const r of toolRules) {
+                            allRules.push({ ...r, tool });
+                        }
+                    }
+                    return { success: true, action: 'list_rules', rules: allRules };
+                }
+                
+                default:
+                    return { success: false, error: `未知操作: ${action}` };
+            }
+        },
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: { type: 'string', enum: ['set_mode', 'get_mode', 'add_rule', 'remove_rule', 'check', 'list_rules'] },
+                tool_name: { type: 'string' },
+                rule: { type: 'object' },
+                mode: { type: 'string', enum: ['default', 'strict', 'permissive'] },
+            },
+            required: ['action'],
+        },
+    },
+    
+    /**
+     * MCP 工具 - Model Context Protocol 基础支持
+     */
+    MCP: {
+        name: 'MCP',
+        description: 'Model Context Protocol 服务器管理',
+        isReadOnly: false,
+        _servers: new Map(),
+        
+        async call({ action, server_id, server_config, tool_name, tool_input }, context) {
+            const servers = this._servers;
+            
+            switch (action) {
+                case 'register_server': {
+                    const id = server_id || `mcp_${Date.now()}`;
+                    const server = {
+                        id,
+                        name: server_config?.name || id,
+                        type: server_config?.type || 'stdio', // stdio, http, websocket
+                        command: server_config?.command,
+                        url: server_config?.url,
+                        tools: server_config?.tools || [],
+                        status: 'registered',
+                        registeredAt: new Date().toISOString(),
+                    };
+                    servers.set(id, server);
+                    
+                    return { success: true, action: 'register_server', server };
+                }
+                
+                case 'list_servers': {
+                    return {
+                        success: true,
+                        action: 'list_servers',
+                        servers: Array.from(servers.values()),
+                        count: servers.size,
+                    };
+                }
+                
+                case 'get_server': {
+                    const server = servers.get(server_id);
+                    if (!server) return { success: false, error: `服务器不存在: ${server_id}` };
+                    return { success: true, action: 'get_server', server };
+                }
+                
+                case 'list_tools': {
+                    const server = servers.get(server_id);
+                    if (!server) return { success: false, error: `服务器不存在: ${server_id}` };
+                    return {
+                        success: true,
+                        action: 'list_tools',
+                        server_id,
+                        tools: server.tools,
+                    };
+                }
+                
+                case 'call_tool': {
+                    const server = servers.get(server_id);
+                    if (!server) return { success: false, error: `服务器不存在: ${server_id}` };
+                    
+                    // 模拟工具调用（实际需要与 MCP 服务器通信）
+                    return {
+                        success: true,
+                        action: 'call_tool',
+                        server_id,
+                        tool_name,
+                        tool_input,
+                        result: `[MCP] 模拟调用 ${server_id}/${tool_name}`,
+                        note: 'MCP 服务器通信需要实际实现',
+                    };
+                }
+                
+                case 'remove_server': {
+                    if (!servers.has(server_id)) {
+                        return { success: false, error: `服务器不存在: ${server_id}` };
+                    }
+                    servers.delete(server_id);
+                    return { success: true, action: 'remove_server', server_id };
+                }
+                
+                default:
+                    return { success: false, error: `未知操作: ${action}` };
+            }
+        },
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: { type: 'string', enum: ['register_server', 'list_servers', 'get_server', 'list_tools', 'call_tool', 'remove_server'] },
+                server_id: { type: 'string' },
+                server_config: { type: 'object' },
+                tool_name: { type: 'string' },
+                tool_input: { type: 'object' },
+            },
+            required: ['action'],
+        },
+    },
 };
 
 // ==================== 对话压缩系统 ====================
@@ -6120,6 +6993,56 @@ ipcMain.handle('clear-history', async () => {
     return { success: true };
 });
 
+// ==================== IPC: 用户回答问题 ====================
+ipcMain.handle('answer-question', async (e, { questionId, answer }) => {
+    if (!global._pendingQuestions) return { success: false, error: '没有待回答的问题' };
+    
+    const pending = global._pendingQuestions.get(questionId);
+    if (!pending) return { success: false, error: `问题不存在: ${questionId}` };
+    
+    pending.resolve(answer);
+    return { success: true };
+});
+
+// ==================== IPC: 计划管理 ====================
+ipcMain.handle('plan-approve', async (e, planId) => {
+    return await TOOLS.Plan.call({ action: 'approve', plan_id: planId });
+});
+
+ipcMain.handle('plan-cancel', async (e, planId) => {
+    return await TOOLS.Plan.call({ action: 'cancel', plan_id: planId });
+});
+
+ipcMain.handle('plan-list', async () => {
+    return await TOOLS.Plan.call({ action: 'list' });
+});
+
+// ==================== IPC: 任务管理 ====================
+ipcMain.handle('todo-list', async () => {
+    return await TOOLS.Todo.call({ action: 'list' });
+});
+
+ipcMain.handle('todo-update', async (e, { id, status }) => {
+    return await TOOLS.Todo.call({ action: 'update', id, status });
+});
+
+// ==================== IPC: 技能管理 ====================
+ipcMain.handle('skill-list', async () => {
+    return await TOOLS.Skill.call({ action: 'list' });
+});
+
+ipcMain.handle('skill-execute', async (e, { skillId, params }) => {
+    return await TOOLS.Skill.call({ action: 'execute', skill_id: skillId, params });
+});
+
+ipcMain.handle('skill-create', async (e, { name, description, steps }) => {
+    return await TOOLS.Skill.call({ action: 'create', name, description, steps });
+});
+
+ipcMain.handle('skill-delete', async (e, { skillId }) => {
+    return await TOOLS.Skill.call({ action: 'delete', skill_id: skillId });
+});
+
 // ==================== IPC: 权限模式管理 ====================
 ipcMain.handle('set-permission-mode', (e, mode) => {
     permissionMode = mode;
@@ -6290,7 +7213,31 @@ ipcMain.handle('chat-with-provider', async (event, { provider, config, userText,
 // ==================== Anthropic 直连循环 ====================
 async function runAnthropicDirectLoop(userText, images, model) {
     const client = providerClients.anthropic;
-    const userMessage = { role: 'user', content: userText };
+    
+    // 构建用户消息，支持图片
+    let userContent;
+    if (images && images.length > 0) {
+        userContent = [{ type: 'text', text: userText || '请描述这张图片' }];
+        for (const imgData of images) {
+            if (imgData.startsWith('data:')) {
+                const match = imgData.match(/^data:([^;]+);base64,(.+)$/);
+                if (match) {
+                    userContent.push({
+                        type: 'image',
+                        source: {
+                            type: 'base64',
+                            media_type: match[1],
+                            data: match[2],
+                        }
+                    });
+                }
+            }
+        }
+    } else {
+        userContent = userText;
+    }
+    
+    const userMessage = { role: 'user', content: userContent };
     addToConversationHistory(userMessage);
     
     let fullResponse = '';
@@ -6779,7 +7726,30 @@ async function runOpenAICompatibleLoop(provider, userText, images, model) {
     }
     
     // 以下是标准聊天模型流程
-    const userMessage = { role: 'user', content: userText };
+    // 构建用户消息，支持图片
+    let userContent;
+    if (images && images.length > 0) {
+        userContent = [
+            { type: 'text', text: userText || '请描述这张图片' }
+        ];
+        for (const img of images) {
+            // 图片是 base64 格式: data:image/png;base64,xxx
+            const match = img.match(/^data:(image\/[^;]+);base64,(.+)$/);
+            if (match) {
+                userContent.push({
+                    type: 'image_url',
+                    image_url: {
+                        url: img,
+                        detail: 'auto'
+                    }
+                });
+            }
+        }
+    } else {
+        userContent = userText;
+    }
+    
+    const userMessage = { role: 'user', content: userContent };
     addToConversationHistory(userMessage);
     
     const messages = [
@@ -6820,43 +7790,83 @@ async function runOpenAICompatibleLoop(provider, userText, images, model) {
         };
         
         // 添加适当的 token 限制参数
+        // 增加输出限制以避免回复被截断
         if (isNewModel) {
-            requestParams.max_completion_tokens = 8192;
+            requestParams.max_completion_tokens = 16384;
         } else {
-            requestParams.max_tokens = 4096;
+            requestParams.max_tokens = 8192;
         }
         
-        const response = await client.chat.completions.create(requestParams);
+        let response;
+        try {
+            response = await client.chat.completions.create(requestParams);
+        } catch (streamError) {
+            console.error(`[${provider}] Stream creation error:`, streamError.message);
+            // 如果是速率限制错误，等待后重试
+            if (streamError.status === 429) {
+                const retryAfter = streamError.headers?.get('retry-after') || 5;
+                console.log(`[${provider}] Rate limited, waiting ${retryAfter}s...`);
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('chat-stream', `\n\n⏳ 速率限制，等待 ${retryAfter} 秒后重试...\n`);
+                }
+                await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+                continue; // 重试当前轮次
+            }
+            throw streamError;
+        }
         
         let currentContent = '';
         const toolCalls = [];
         let currentToolCall = null;
+        let streamError = null;
         
-        for await (const chunk of response) {
-            if (isChatStopped) break;
-            
-            const delta = chunk.choices[0]?.delta;
-            if (!delta) continue;
-            
-            if (delta.content) {
-                currentContent += delta.content;
-                fullResponse += delta.content;
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                    mainWindow.webContents.send('chat-stream', delta.content);
-                }
-            }
-            
-            if (delta.tool_calls) {
-                for (const tc of delta.tool_calls) {
-                    if (tc.index !== undefined) {
-                        while (toolCalls.length <= tc.index) {
-                            toolCalls.push({ id: '', name: '', arguments: '' });
-                        }
-                        if (tc.id) toolCalls[tc.index].id = tc.id;
-                        if (tc.function?.name) toolCalls[tc.index].name = tc.function.name;
-                        if (tc.function?.arguments) toolCalls[tc.index].arguments += tc.function.arguments;
+        try {
+            for await (const chunk of response) {
+                if (isChatStopped) break;
+                
+                const delta = chunk.choices[0]?.delta;
+                if (!delta) continue;
+                
+                // 检查是否因为 finish_reason 而结束
+                const finishReason = chunk.choices[0]?.finish_reason;
+                if (finishReason === 'length') {
+                    console.warn(`[${provider}] Response truncated due to max_tokens limit`);
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('chat-stream', '\n\n⚠️ *回复因长度限制被截断*');
                     }
                 }
+                
+                if (delta.content) {
+                    currentContent += delta.content;
+                    fullResponse += delta.content;
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('chat-stream', delta.content);
+                    }
+                }
+                
+                if (delta.tool_calls) {
+                    for (const tc of delta.tool_calls) {
+                        if (tc.index !== undefined) {
+                            while (toolCalls.length <= tc.index) {
+                                toolCalls.push({ id: '', name: '', arguments: '' });
+                            }
+                            if (tc.id) toolCalls[tc.index].id = tc.id;
+                            if (tc.function?.name) toolCalls[tc.index].name = tc.function.name;
+                            if (tc.function?.arguments) toolCalls[tc.index].arguments += tc.function.arguments;
+                        }
+                    }
+                }
+            }
+        } catch (chunkError) {
+            console.error(`[${provider}] Stream chunk error:`, chunkError.message);
+            streamError = chunkError;
+            // 如果已经有部分内容，继续处理而不是完全失败
+            if (currentContent) {
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('chat-stream', '\n\n⚠️ *连接中断，显示已接收内容*');
+                }
+            } else {
+                throw chunkError;
             }
         }
         
@@ -6910,7 +7920,26 @@ async function runGoogleGeminiLoop(userText, images, model) {
     const baseUrl = config.baseUrl;
     const modelName = model || config.selectedModel;
     
-    const userMessage = { role: 'user', content: userText };
+    // 构建用户消息，支持图片（Gemini 格式）
+    let userParts = [{ text: userText || '请描述这张图片' }];
+    if (images && images.length > 0) {
+        for (const imgData of images) {
+            if (imgData.startsWith('data:')) {
+                const match = imgData.match(/^data:([^;]+);base64,(.+)$/);
+                if (match) {
+                    userParts.push({
+                        inline_data: {
+                            mime_type: match[1],
+                            data: match[2]
+                        }
+                    });
+                }
+            }
+        }
+    }
+    
+    // 内部存储使用标准格式
+    const userMessage = { role: 'user', content: userText, images: images };
     addToConversationHistory(userMessage);
     
     let fullResponse = '';
@@ -6926,11 +7955,44 @@ async function runGoogleGeminiLoop(userText, images, model) {
         }))
     }];
     
-    // 构建历史消息（Gemini 格式）
-    const contents = getConversationHistory().map(msg => ({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content) }]
-    }));
+    // 构建历史消息（Gemini 格式），支持图片
+    const contents = getConversationHistory().map(msg => {
+        const parts = [];
+        
+        // 处理文本内容
+        if (typeof msg.content === 'string') {
+            parts.push({ text: msg.content });
+        } else if (Array.isArray(msg.content)) {
+            // 多模态内容
+            for (const item of msg.content) {
+                if (item.type === 'text') {
+                    parts.push({ text: item.text });
+                }
+            }
+        }
+        
+        // 处理图片
+        if (msg.images && msg.images.length > 0) {
+            for (const imgData of msg.images) {
+                if (imgData.startsWith('data:')) {
+                    const match = imgData.match(/^data:([^;]+);base64,(.+)$/);
+                    if (match) {
+                        parts.push({
+                            inline_data: {
+                                mime_type: match[1],
+                                data: match[2]
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        
+        return {
+            role: msg.role === 'assistant' ? 'model' : 'user',
+            parts: parts.length > 0 ? parts : [{ text: '' }]
+        };
+    });
     
     // 创建 fetch 函数（可能带代理）
     let fetchFn = fetch;
@@ -6960,40 +8022,48 @@ async function runGoogleGeminiLoop(userText, images, model) {
             throw new Error(`Gemini API error: ${response.status} - ${errText}`);
         }
         
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
         let currentText = '';
         const functionCalls = [];
         
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        // 使用 Node.js 兼容的流式处理
+        const processStream = () => new Promise((resolve, reject) => {
+            let buffer = '';
             
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
-            
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    try {
-                        const data = JSON.parse(line.slice(6));
-                        if (data.candidates?.[0]?.content?.parts) {
-                            for (const part of data.candidates[0].content.parts) {
-                                if (part.text) {
-                                    currentText += part.text;
-                                    fullResponse += part.text;
-                                    if (mainWindow && !mainWindow.isDestroyed()) {
-                                        mainWindow.webContents.send('chat-stream', part.text);
+            response.body.on('data', (chunk) => {
+                buffer += chunk.toString();
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || ''; // 保留不完整的行
+                
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(line.slice(6));
+                            if (data.candidates?.[0]?.content?.parts) {
+                                for (const part of data.candidates[0].content.parts) {
+                                    if (part.text) {
+                                        currentText += part.text;
+                                        fullResponse += part.text;
+                                        if (mainWindow && !mainWindow.isDestroyed()) {
+                                            mainWindow.webContents.send('chat-stream', part.text);
+                                        }
+                                    }
+                                    if (part.functionCall) {
+                                        functionCalls.push(part.functionCall);
                                     }
                                 }
-                                if (part.functionCall) {
-                                    functionCalls.push(part.functionCall);
-                                }
                             }
+                        } catch (e) {
+                            // 忽略解析错误
                         }
-                    } catch (e) {}
+                    }
                 }
-            }
-        }
+            });
+            
+            response.body.on('end', () => resolve());
+            response.body.on('error', (err) => reject(err));
+        });
+        
+        await processStream();
         
         // 处理函数调用
         if (functionCalls.length > 0) {
