@@ -452,7 +452,63 @@ body {
 .header-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+}
+
+/* 统一图标按钮样式 */
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.icon-btn:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  transform: scale(1.05);
+}
+
+.icon-btn:active {
+  transform: scale(0.95);
+}
+
+/* SSH 按钮状态 */
+.icon-btn.ssh-btn.connected {
+  background: linear-gradient(135deg, #dcfce7, #bbf7d0);
+  border-color: #86efac;
+}
+
+.icon-btn.ssh-btn.connected:hover {
+  background: linear-gradient(135deg, #bbf7d0, #86efac);
+}
+
+/* 权限模式按钮状态 */
+.icon-btn.permission-btn.auto-mode {
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  border-color: #fcd34d;
+}
+
+.icon-btn.permission-btn.auto-mode:hover {
+  background: linear-gradient(135deg, #fde68a, #fcd34d);
+}
+
+.icon-btn.permission-btn.safe-mode {
+  background: linear-gradient(135deg, #e0e7ff, #c7d2fe);
+  border-color: #a5b4fc;
+}
+
+.icon-btn.permission-btn.safe-mode:hover {
+  background: linear-gradient(135deg, #c7d2fe, #a5b4fc);
 }
 
 .clear-btn {
@@ -4059,6 +4115,32 @@ details.tb.error b { color: #cf1322; }
   color: var(--text-secondary);
 }
 
+/* Dark mode icon buttons */
+[data-theme="dark"] .icon-btn {
+  background: var(--bg-tertiary);
+  border-color: var(--border-color);
+}
+
+[data-theme="dark"] .icon-btn:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+[data-theme="dark"] .icon-btn.ssh-btn.connected {
+  background: rgba(34, 197, 94, 0.2);
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+[data-theme="dark"] .icon-btn.permission-btn.auto-mode {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+[data-theme="dark"] .icon-btn.permission-btn.safe-mode {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
 [data-theme="dark"] .config-btn {
   border-color: var(--border-color);
   color: var(--text-secondary);
@@ -5010,4 +5092,240 @@ details.tb.error b { color: #cf1322; }
 
 [data-theme="dark"] .todo-content {
   color: var(--text-primary);
+}
+
+/* ==================== Token 状态指示器 ==================== */
+.token-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 12px;
+  height: 32px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+
+.token-status:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.token-status.warning {
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+
+.token-status.warning:hover {
+  background: #fef3c7;
+  border-color: #fbbf24;
+}
+
+.token-status.critical {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  animation: pulse-critical 1.5s infinite;
+}
+
+.token-status.critical:hover {
+  background: #fee2e2;
+  border-color: #f87171;
+}
+
+@keyframes pulse-critical {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}
+
+.token-bar {
+  width: 40px;
+  height: 6px;
+  background: #e2e8f0;
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.token-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #22c55e, #84cc16);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.token-status.warning .token-fill {
+  background: linear-gradient(90deg, #f59e0b, #eab308);
+}
+
+.token-status.critical .token-fill {
+  background: linear-gradient(90deg, #ef4444, #f97316);
+}
+
+.token-text {
+  font-weight: 600;
+  color: #64748b;
+  min-width: 28px;
+  text-align: right;
+  font-size: 11px;
+}
+
+.token-status.warning .token-text {
+  color: #b45309;
+}
+
+.token-status.critical .token-text {
+  color: #dc2626;
+}
+
+/* ==================== 压缩通知 ==================== */
+.compact-notice {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  animation: slide-up 0.3s ease;
+}
+
+@keyframes slide-up {
+  from {
+    transform: translateX(-50%) translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+  }
+}
+
+.compact-notice-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border: 1px solid #f59e0b;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.compact-icon {
+  font-size: 20px;
+}
+
+.compact-text {
+  font-size: 14px;
+  color: #92400e;
+  font-weight: 500;
+}
+
+.compact-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.compact-btn {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.compact-btn.simple {
+  background: #fff;
+  color: #b45309;
+  border: 1px solid #f59e0b;
+}
+
+.compact-btn.simple:hover:not(:disabled) {
+  background: #fffbeb;
+}
+
+.compact-btn.ai {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  color: #fff;
+}
+
+.compact-btn.ai:hover:not(:disabled) {
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+}
+
+.compact-btn.dismiss {
+  background: transparent;
+  color: #78716c;
+}
+
+.compact-btn.dismiss:hover {
+  color: #44403c;
+  text-decoration: underline;
+}
+
+.compact-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Dark mode for token status */
+[data-theme="dark"] .token-status {
+  background: var(--bg-tertiary);
+  border-color: var(--border-color);
+}
+
+[data-theme="dark"] .token-status:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+[data-theme="dark"] .token-status.warning {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+[data-theme="dark"] .token-status.critical {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+[data-theme="dark"] .token-bar {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+[data-theme="dark"] .token-text {
+  color: #94a3b8;
+}
+
+[data-theme="dark"] .token-status.warning .token-text {
+  color: #fcd34d;
+}
+
+[data-theme="dark"] .token-status.critical .token-text {
+  color: #fca5a5;
+}
+
+[data-theme="dark"] .compact-notice-content {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.3) 0%, rgba(251, 191, 36, 0.3) 100%);
+  border-color: rgba(245, 158, 11, 0.5);
+}
+
+[data-theme="dark"] .compact-text {
+  color: #fcd34d;
+}
+
+[data-theme="dark"] .compact-btn.simple {
+  background: rgba(0, 0, 0, 0.3);
+  color: #fcd34d;
+  border-color: rgba(245, 158, 11, 0.5);
+}
+
+[data-theme="dark"] .compact-btn.dismiss {
+  color: #a8a29e;
 }

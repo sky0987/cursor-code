@@ -686,6 +686,17 @@ function App() {
   const [showCreateSkill, setShowCreateSkill] = useState(false);
   const [newSkill, setNewSkill] = useState({ name: '', description: '', steps: '' });
   
+  // Token 状态和上下文压缩
+  const [tokenStatus, setTokenStatus] = useState<{
+    currentTokens: number;
+    contextWindow: number;
+    percentUsed: number;
+    status: 'normal' | 'warning' | 'critical';
+    shouldCompact: boolean;
+  } | null>(null);
+  const [isCompacting, setIsCompacting] = useState(false);
+  const [showCompactNotice, setShowCompactNotice] = useState(false);
+  
   // 当前选择的厂商
   const [currentProvider, setCurrentProvider] = useState<ApiProvider>(() => {
     return (localStorage.getItem('current-provider') as ApiProvider) || 'cursor2api';
@@ -1281,6 +1292,95 @@ function App() {
     document.body.appendChild(el);
     setTimeout(() => el.remove(), 3000);
   };
+
+  // 更新 Token 状态
+  const updateTokenStatus = async () => {
+    if (messages.length === 0) {
+      setTokenStatus(null);
+      return;
+    }
+    try {
+      const status = await ipcRenderer.invoke('get-token-status', {
+        messages: messages.map(m => ({ role: m.role, content: m.content })),
+        model: currentConfig.selectedModel,
+      });
+      setTokenStatus(status);
+      
+      // 如果达到警告阈值，显示通知
+      if (status.status === 'warning' && !showCompactNotice) {
+        setShowCompactNotice(true);
+      }
+    } catch (err) {
+      console.error('Failed to get token status:', err);
+    }
+  };
+
+  // 执行上下文压缩
+  const performCompact = async (useAI = false) => {
+    if (isCompacting || messages.length < 5) return;
+    
+    setIsCompacting(true);
+    showNotification('📦 正在压缩对话上下文...');
+    
+    try {
+      let result: {
+        messages: Array<{ role: string; content: string }>;
+        wasCompacted: boolean;
+        summary?: string;
+        stats?: { beforeTokens: number; afterTokens: number; savedTokens: number };
+      };
+      
+      if (useAI) {
+        result = await ipcRenderer.invoke('compact-messages-with-ai', {
+          messages: messages.map(m => ({ role: m.role, content: m.content })),
+          model: currentConfig.selectedModel,
+        });
+      } else {
+        result = await ipcRenderer.invoke('compact-messages', {
+          messages: messages.map(m => ({ role: m.role, content: m.content })),
+        });
+      }
+      
+      if (result.wasCompacted) {
+        // 更新消息列表（将 system 消息转换为 assistant）
+        const newMessages: Message[] = result.messages.map((m: { role: string; content: string }) => ({
+          role: (m.role === 'system' ? 'assistant' : m.role) as 'user' | 'assistant',
+          content: m.content,
+        }));
+        setMessages(newMessages);
+        
+        // 更新当前会话
+        setSessions(prev => {
+          const updated = prev.map(s => 
+            s.id === currentSessionId 
+              ? { ...s, messages: newMessages, updatedAt: Date.now() }
+              : s
+          );
+          saveSessionsToStorage(updated);
+          return updated;
+        });
+        
+        const stats = result.stats;
+        showNotification(`✅ 压缩完成: ${stats?.beforeTokens || 0} → ${stats?.afterTokens || 0} tokens`);
+        setShowCompactNotice(false);
+        
+        // 更新 Token 状态
+        setTimeout(updateTokenStatus, 500);
+      } else {
+        showNotification('ℹ️ 当前上下文无需压缩');
+      }
+    } catch (err: any) {
+      console.error('Compact error:', err);
+      showNotification('❌ 压缩失败: ' + err.message);
+    } finally {
+      setIsCompacting(false);
+    }
+  };
+
+  // 监听消息变化，更新 Token 状态
+  useEffect(() => {
+    updateTokenStatus();
+  }, [messages.length, currentConfig.selectedModel]);
 
   // 停止当前请求
   const stopRequest = async () => {
@@ -1967,6 +2067,40 @@ function App() {
                   <span>不再询问</span>
                 </label>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 上下文压缩通知 */}
+      {showCompactNotice && tokenStatus?.status === 'warning' && (
+        <div className="compact-notice">
+          <div className="compact-notice-content">
+            <span className="compact-icon">⚠️</span>
+            <span className="compact-text">
+              上下文使用率 {tokenStatus.percentUsed}%，建议压缩以保持最佳性能
+            </span>
+            <div className="compact-actions">
+              <button 
+                className="compact-btn simple"
+                onClick={() => performCompact(false)}
+                disabled={isCompacting}
+              >
+                {isCompacting ? '压缩中...' : '快速压缩'}
+              </button>
+              <button 
+                className="compact-btn ai"
+                onClick={() => performCompact(true)}
+                disabled={isCompacting}
+              >
+                {isCompacting ? '压缩中...' : 'AI 摘要'}
+              </button>
+              <button 
+                className="compact-btn dismiss"
+                onClick={() => setShowCompactNotice(false)}
+              >
+                稍后
+              </button>
             </div>
           </div>
         </div>
@@ -2900,41 +3034,57 @@ function App() {
             >
               📋
             </button>
+            {/* Token 状态指示器 */}
+            {tokenStatus && (
+              <div 
+                className={`token-status ${tokenStatus.status}`}
+                onClick={() => tokenStatus.shouldCompact && performCompact(false)}
+                title={`${tokenStatus.currentTokens.toLocaleString()} / ${tokenStatus.contextWindow.toLocaleString()} tokens (${tokenStatus.percentUsed}%)\n${tokenStatus.shouldCompact ? '点击压缩' : ''}`}
+              >
+                <span className="token-bar">
+                  <span 
+                    className="token-fill" 
+                    style={{ width: `${Math.min(100, tokenStatus.percentUsed)}%` }}
+                  />
+                </span>
+                <span className="token-text">{tokenStatus.percentUsed}%</span>
+              </div>
+            )}
             {/* SSH 远程连接按钮 */}
             <button 
-              className={`ssh-btn ${isRemoteMode ? 'connected' : ''}`}
+              className={`icon-btn ssh-btn ${isRemoteMode ? 'connected' : ''}`}
               onClick={() => isRemoteMode ? disconnectSSH() : setShowSSHManager(true)}
-              title={isRemoteMode ? `已连接: ${sshStatus.host} - 点击断开` : '远程连接管理'}
+              title={isRemoteMode ? `🌐 远程模式\n已连接: ${sshStatus.host}\n点击断开` : '📡 本地模式\n点击管理远程连接'}
             >
-              {isRemoteMode ? '🌐' : '📡'} {isRemoteMode ? '远程' : '本地'}
+              {isRemoteMode ? '🌐' : '📡'}
             </button>
             <button 
-              className={`mode-btn permission-btn ${permissionMode === 'auto' ? 'auto-mode' : 'safe-mode'}`}
+              className={`icon-btn permission-btn ${permissionMode === 'auto' ? 'auto-mode' : 'safe-mode'}`}
               onClick={() => {
                 const newMode = permissionMode === 'default' ? 'auto' : 'default';
                 setPermissionMode(newMode);
                 showNotification(newMode === 'auto' ? '⚡ 自动模式：工具将自动执行' : '🔒 安全模式：危险操作需确认');
               }}
-              title={permissionMode === 'auto' ? '⚡ 自动模式 - 点击切换到安全模式' : '🔒 安全模式 - 点击切换到自动模式'}
+              title={permissionMode === 'auto' ? '⚡ 自动模式\n工具将自动执行\n点击切换到安全模式' : '🔒 安全模式\n危险操作需确认\n点击切换到自动模式'}
             >
-              {permissionMode === 'auto' ? '⚡ 自动' : '🔒 安全'}
+              {permissionMode === 'auto' ? '⚡' : '🔒'}
             </button>
             <button 
-              className="theme-btn" 
+              className="icon-btn theme-btn" 
               onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')}
-              title={theme === 'light' ? '切换到暗色主题' : '切换到亮色主题'}
+              title={theme === 'light' ? '🌙 切换到暗色主题' : '☀️ 切换到亮色主题'}
             >
               {theme === 'light' ? '🌙' : '☀️'}
             </button>
             <button 
-              className="clear-btn" 
+              className="icon-btn clear-btn" 
               onClick={async () => { 
                 clearCurrentSession();
                 setToolResults([]);
                 await ipcRenderer.invoke('clear-history');
                 showNotification('✅ 当前会话已清空');
               }}
-              title="清空当前会话"
+              title="🗑️ 清空当前会话"
             >
               🗑️
             </button>

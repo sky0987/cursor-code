@@ -3744,9 +3744,44 @@ const TOOLS = {
     },
 };
 
-// ==================== 对话压缩系统 ====================
+// ==================== 对话压缩系统 (Claude Code 风格) ====================
 const ConversationCompact = {
-    // Token 估算（简化版，约 4 字符 = 1 token）
+    // 配置常量
+    config: {
+        // 各模型的上下文窗口大小
+        contextWindows: {
+            'claude-3-opus': 200000,
+            'claude-3-sonnet': 200000,
+            'claude-3-haiku': 200000,
+            'claude-sonnet-4': 200000,
+            'claude-opus-4': 200000,
+            'gpt-4-turbo': 128000,
+            'gpt-4o': 128000,
+            'gpt-4.1': 128000,
+            'gpt-5': 256000,
+            'gemini-2.5-pro': 1000000,
+            'gemini-2.5-flash': 1000000,
+            'deepseek': 64000,
+            'qwen': 32000,
+            'default': 100000,
+        },
+        // 压缩阈值（上下文窗口的百分比）
+        autoCompactThresholdPercent: 0.85,
+        warningThresholdPercent: 0.75,
+        // 保留最近消息的 token 预算
+        keepRecentTokenBudget: 20000,
+        // 摘要最大输出 token
+        maxSummaryOutputTokens: 8000,
+        // 可压缩的工具类型
+        compactableTools: new Set([
+            'Read', 'Shell', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 
+            'StrReplace', 'Write', 'Delete', 'Bash', 'PowerShell'
+        ]),
+        // 微压缩：保留最近 N 个工具结果
+        microCompactKeepRecent: 10,
+    },
+
+    // Token 估算（约 4 字符 = 1 token，中文约 2 字符 = 1 token）
     estimateTokens(messages) {
         if (!messages) return 0;
         let total = 0;
@@ -3754,29 +3789,246 @@ const ConversationCompact = {
             const content = typeof msg.content === 'string' 
                 ? msg.content 
                 : JSON.stringify(msg.content || '');
-            total += Math.ceil(content.length / 4);
+            // 检测中文字符比例，调整估算
+            const chineseChars = (content.match(/[\u4e00-\u9fa5]/g) || []).length;
+            const otherChars = content.length - chineseChars;
+            total += Math.ceil(chineseChars / 2 + otherChars / 4);
         }
         return total;
     },
-    
-    // 压缩消息
-    compact(messages, maxTokens = 4000) {
+
+    // 获取模型的上下文窗口大小
+    getContextWindow(model) {
+        if (!model) return this.config.contextWindows.default;
+        const modelLower = model.toLowerCase();
+        for (const [key, value] of Object.entries(this.config.contextWindows)) {
+            if (modelLower.includes(key.toLowerCase())) {
+                return value;
+            }
+        }
+        return this.config.contextWindows.default;
+    },
+
+    // 计算自动压缩阈值
+    getAutoCompactThreshold(model) {
+        const contextWindow = this.getContextWindow(model);
+        return Math.floor(contextWindow * this.config.autoCompactThresholdPercent);
+    },
+
+    // 计算警告阈值
+    getWarningThreshold(model) {
+        const contextWindow = this.getContextWindow(model);
+        return Math.floor(contextWindow * this.config.warningThresholdPercent);
+    },
+
+    // 检查是否需要压缩
+    shouldCompact(messages, model) {
+        const tokens = this.estimateTokens(messages);
+        const threshold = this.getAutoCompactThreshold(model);
+        return tokens >= threshold;
+    },
+
+    // 检查是否接近警告阈值
+    isNearWarning(messages, model) {
+        const tokens = this.estimateTokens(messages);
+        const threshold = this.getWarningThreshold(model);
+        return tokens >= threshold;
+    },
+
+    // 获取 token 使用状态
+    getTokenStatus(messages, model) {
+        const tokens = this.estimateTokens(messages);
+        const contextWindow = this.getContextWindow(model);
+        const autoThreshold = this.getAutoCompactThreshold(model);
+        const warnThreshold = this.getWarningThreshold(model);
+        const percentUsed = Math.round((tokens / contextWindow) * 100);
+        
+        return {
+            currentTokens: tokens,
+            contextWindow,
+            autoCompactThreshold: autoThreshold,
+            warningThreshold: warnThreshold,
+            percentUsed,
+            status: tokens >= autoThreshold ? 'critical' : 
+                    tokens >= warnThreshold ? 'warning' : 'normal',
+            shouldCompact: tokens >= autoThreshold,
+            shouldWarn: tokens >= warnThreshold,
+        };
+    },
+
+    // 微压缩：清理旧的工具结果，但不生成摘要
+    microCompact(messages) {
+        const toolResultIds = [];
+        const toolResultMap = new Map();
+        
+        // 收集所有可压缩的工具结果
+        for (const msg of messages) {
+            if (msg.role === 'assistant' && msg.tool_calls) {
+                for (const tc of msg.tool_calls) {
+                    if (this.config.compactableTools.has(tc.function?.name)) {
+                        toolResultIds.push(tc.id);
+                    }
+                }
+            }
+            // OpenAI 格式的工具结果
+            if (msg.role === 'tool' && msg.tool_call_id) {
+                toolResultMap.set(msg.tool_call_id, msg);
+            }
+        }
+        
+        // 保留最近的 N 个工具结果
+        const keepSet = new Set(toolResultIds.slice(-this.config.microCompactKeepRecent));
+        const clearSet = new Set(toolResultIds.filter(id => !keepSet.has(id)));
+        
+        if (clearSet.size === 0) {
+            return { messages, cleared: 0, tokensSaved: 0 };
+        }
+        
+        let tokensSaved = 0;
+        const result = messages.map(msg => {
+            if (msg.role === 'tool' && clearSet.has(msg.tool_call_id)) {
+                const originalTokens = this.estimateTokens([msg]);
+                const cleared = { ...msg, content: '[旧工具结果已清理]' };
+                tokensSaved += originalTokens - this.estimateTokens([cleared]);
+                return cleared;
+            }
+            return msg;
+        });
+        
+        console.log(`[MicroCompact] 清理了 ${clearSet.size} 个旧工具结果，节省约 ${tokensSaved} tokens`);
+        
+        return { messages: result, cleared: clearSet.size, tokensSaved };
+    },
+
+    // 生成压缩提示词（用于让 AI 生成摘要）
+    getCompactPrompt() {
+        return `请为以上对话创建详细摘要，包含以下部分：
+
+1. **用户请求和意图**: 详细描述用户的所有明确请求
+2. **关键技术概念**: 列出讨论的重要技术概念、框架和技术
+3. **文件和代码**: 列出检查、修改或创建的具体文件和代码片段
+4. **错误和修复**: 列出遇到的所有错误及其解决方法
+5. **问题解决**: 描述已解决的问题和进行中的排查
+6. **用户消息**: 列出所有非工具结果的用户消息
+7. **待完成任务**: 列出待完成的任务
+8. **当前工作**: 详细描述压缩前正在进行的工作
+9. **下一步**: 列出与最近工作相关的下一步计划
+
+请用结构化的格式输出摘要，确保技术细节准确完整。`;
+    },
+
+    // 完整压缩（需要 AI 生成摘要）
+    async compactWithAI(messages, aiClient, model) {
+        const status = this.getTokenStatus(messages, model);
+        
+        if (!status.shouldCompact) {
+            return { messages, summary: null, wasCompacted: false };
+        }
+        
+        console.log(`[Compact] 开始压缩，当前 ${status.currentTokens} tokens (${status.percentUsed}%)`);
+        
+        // 先执行微压缩
+        const microResult = this.microCompact(messages);
+        let workingMessages = microResult.messages;
+        
+        // 准备要发送给 AI 的消息
+        const compactPrompt = this.getCompactPrompt();
+        const messagesForSummary = [
+            ...workingMessages,
+            { role: 'user', content: compactPrompt }
+        ];
+        
+        try {
+            // 调用 AI 生成摘要
+            const summaryResponse = await aiClient.chat.completions.create({
+                model: model,
+                messages: messagesForSummary,
+                max_tokens: this.config.maxSummaryOutputTokens,
+                temperature: 0.3,
+            });
+            
+            const summary = summaryResponse.choices[0]?.message?.content;
+            
+            if (!summary) {
+                throw new Error('AI 未返回有效摘要');
+            }
+            
+            // 计算要保留的最近消息
+            const keepMessages = [];
+            let keepTokens = 0;
+            
+            for (let i = workingMessages.length - 1; i >= 0; i--) {
+                const msg = workingMessages[i];
+                const msgTokens = this.estimateTokens([msg]);
+                
+                if (keepTokens + msgTokens > this.config.keepRecentTokenBudget) {
+                    break;
+                }
+                
+                keepMessages.unshift(msg);
+                keepTokens += msgTokens;
+            }
+            
+            // 构建压缩后的消息
+            const compactedMessages = [
+                {
+                    role: 'system',
+                    content: `[对话摘要 - 由 AI 自动生成]
+此会话是从之前的对话继续的，以下是早期对话的摘要：
+
+${summary}
+
+---
+如果需要早期对话的具体细节（如精确的代码片段、错误消息），请告知用户。
+继续对话时，请直接从上次中断的地方开始，不要重复摘要内容。`,
+                },
+                ...keepMessages,
+            ];
+            
+            const newTokens = this.estimateTokens(compactedMessages);
+            console.log(`[Compact] 压缩完成: ${status.currentTokens} -> ${newTokens} tokens`);
+            
+            return {
+                messages: compactedMessages,
+                summary,
+                wasCompacted: true,
+                stats: {
+                    beforeTokens: status.currentTokens,
+                    afterTokens: newTokens,
+                    savedTokens: status.currentTokens - newTokens,
+                    removedMessages: messages.length - keepMessages.length,
+                    keptMessages: keepMessages.length,
+                }
+            };
+        } catch (error) {
+            console.error('[Compact] AI 摘要生成失败:', error.message);
+            // 降级到简单压缩
+            return this.compact(messages, Math.floor(status.contextWindow * 0.5));
+        }
+    },
+
+    // 简单压缩（不调用 AI，只保留最近消息）
+    compact(messages, maxTokens = 50000) {
         if (!messages || messages.length === 0) {
-            return { messages: [], summary: null };
+            return { messages: [], summary: null, wasCompacted: false };
         }
         
         const currentTokens = this.estimateTokens(messages);
         if (currentTokens <= maxTokens) {
-            return { messages, summary: null };
+            return { messages, summary: null, wasCompacted: false };
         }
+        
+        // 先执行微压缩
+        const microResult = this.microCompact(messages);
+        let workingMessages = microResult.messages;
         
         // 保留最近的消息
         const compacted = [];
         let tokens = 0;
         
         // 从后向前保留消息
-        for (let i = messages.length - 1; i >= 0; i--) {
-            const msg = messages[i];
+        for (let i = workingMessages.length - 1; i >= 0; i--) {
+            const msg = workingMessages[i];
             const msgTokens = this.estimateTokens([msg]);
             
             if (tokens + msgTokens > maxTokens * 0.8) {
@@ -3787,26 +4039,42 @@ const ConversationCompact = {
             tokens += msgTokens;
         }
         
-        // 生成摘要
+        // 生成简单摘要
         const removedCount = messages.length - compacted.length;
-        const summary = removedCount > 0 
-            ? `[对话已压缩: 移除了 ${removedCount} 条早期消息，保留最近 ${compacted.length} 条]`
-            : null;
+        const summary = `[对话已压缩: 移除了 ${removedCount} 条早期消息，保留最近 ${compacted.length} 条，节省约 ${currentTokens - tokens} tokens]`;
         
-        // 如果有摘要，添加到开头
-        if (summary) {
-            compacted.unshift({
-                role: 'system',
-                content: summary,
-            });
-        }
+        // 添加摘要到开头
+        compacted.unshift({
+            role: 'system',
+            content: summary,
+        });
         
-        return { messages: compacted, summary };
+        console.log(`[Compact] 简单压缩: ${currentTokens} -> ${tokens} tokens`);
+        
+        return { 
+            messages: compacted, 
+            summary, 
+            wasCompacted: true,
+            stats: {
+                beforeTokens: currentTokens,
+                afterTokens: tokens,
+                savedTokens: currentTokens - tokens,
+                removedMessages: removedCount,
+                keptMessages: compacted.length - 1,
+            }
+        };
     },
-    
-    // 自动压缩检查
-    shouldCompact(messages, threshold = 8000) {
-        return this.estimateTokens(messages) > threshold;
+
+    // 基于时间的压缩检查
+    shouldTimeBasedCompact(messages, gapThresholdMinutes = 30) {
+        if (messages.length === 0) return false;
+        
+        // 找到最后一条助手消息
+        const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
+        if (!lastAssistant || !lastAssistant.timestamp) return false;
+        
+        const gapMinutes = (Date.now() - new Date(lastAssistant.timestamp).getTime()) / 60000;
+        return gapMinutes >= gapThresholdMinutes;
     },
 };
 
@@ -8757,15 +9025,52 @@ ipcMain.handle('estimate-tokens', (event, text) => {
     return { tokens: TokenCounter.count(text) };
 });
 
-// 对话压缩
+// 对话压缩（简单版）
 ipcMain.handle('compact-messages', async (event, { messages, maxTokens }) => {
     const result = ConversationCompact.compact(messages, maxTokens);
     return result;
 });
 
+// 对话压缩（AI 摘要版）
+ipcMain.handle('compact-messages-with-ai', async (event, { messages, model }) => {
+    try {
+        // 获取当前配置的 AI 客户端
+        const config = providersConfig[currentProvider] || {};
+        let client = null;
+        
+        if (currentProvider === 'openai' || currentProvider === 'deepseek' || 
+            currentProvider === 'qwen' || currentProvider === 'openrouter' || currentProvider === 'custom') {
+            client = openaiClient;
+        }
+        
+        if (!client) {
+            // 降级到简单压缩
+            return ConversationCompact.compact(messages);
+        }
+        
+        const result = await ConversationCompact.compactWithAI(messages, client, model);
+        return result;
+    } catch (error) {
+        console.error('[compact-with-ai] Error:', error.message);
+        return ConversationCompact.compact(messages);
+    }
+});
+
+// 微压缩（只清理旧工具结果）
+ipcMain.handle('micro-compact', async (event, { messages }) => {
+    const result = ConversationCompact.microCompact(messages);
+    return result;
+});
+
+// 获取 Token 状态
+ipcMain.handle('get-token-status', (event, { messages, model }) => {
+    return ConversationCompact.getTokenStatus(messages, model);
+});
+
 // 检查是否需要压缩
-ipcMain.handle('should-compact', (event, { messages, threshold }) => {
-    return { shouldCompact: ConversationCompact.shouldCompact(messages, threshold) };
+ipcMain.handle('should-compact', (event, { messages, model }) => {
+    const status = ConversationCompact.getTokenStatus(messages, model);
+    return status;
 });
 
 // 文件历史 - 创建快照
